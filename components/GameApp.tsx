@@ -32,17 +32,9 @@ import {
   MIN_LOOP_SIZE,
   STARTING_HINTS,
   DIFFICULTY_STAGES,
-  LEVEL_PRESETS,
 } from "@/game/config";
 import { isFeverCombo } from "@/game/scoring";
-import { levelDisplayName } from "@/game/difficulty";
-import type {
-  DailyStreak,
-  DifficultyLevel,
-  GameAction,
-  GameState,
-  TeachFlags,
-} from "@/types/game";
+import type { DailyStreak, GameAction, GameState, TeachFlags } from "@/types/game";
 import { playSfx } from "@/lib/audio";
 import { haptic } from "@/lib/haptics";
 import { shareText } from "@/lib/share";
@@ -69,7 +61,6 @@ import type { Settings } from "@/types/game";
 
 type View =
   | "home"
-  | "levels"
   | "play"
   | "daily"
   | "tutorial"
@@ -117,14 +108,13 @@ function buildTutorialState(): GameState {
       connections: [],
     };
   }
-  return { ...base, board, undosLeft: 1, difficultyLevel: "easy" as const };
+  return { ...base, board, undosLeft: 1 };
 }
 
 export function GameApp() {
   const [view, setView] = useState<View>("home");
-  const [selectedLevel, setSelectedLevel] = useState<DifficultyLevel>("medium");
   const [state, dispatch] = useReducer(gameReducer, undefined, () =>
-    newEndlessGame("medium"),
+    newEndlessGame(),
   );
   const [settings, setSettingsState] = useState<Settings>({
     sound: true,
@@ -233,7 +223,18 @@ export function GameApp() {
   }, [state, view]);
 
   useEffect(() => {
-    if (state.gameOver && state.mode === "endless" && !recordedGameOver.current) {
+    const canRecover =
+      state.mode === "endless" &&
+      state.gameOver &&
+      state.recoveryUndosLeft > 0 &&
+      state.preClearSnapshot != null;
+    // Only record stats on final game over (no recovery left / declined)
+    if (
+      state.gameOver &&
+      state.mode === "endless" &&
+      !canRecover &&
+      !recordedGameOver.current
+    ) {
       recordedGameOver.current = true;
       playSfx("gameover", settings.sound);
       haptic(settings.haptics, [30, 40, 30]);
@@ -251,7 +252,16 @@ export function GameApp() {
       clearSession();
     }
     if (!state.gameOver) recordedGameOver.current = false;
-  }, [state.gameOver, state.mode, state.score, state.stats, settings.sound, settings.haptics]);
+  }, [
+    state.gameOver,
+    state.mode,
+    state.score,
+    state.stats,
+    state.recoveryUndosLeft,
+    state.preClearSnapshot,
+    settings.sound,
+    settings.haptics,
+  ]);
 
   useEffect(() => {
     if (state.dailySolved && state.mode === "daily") {
@@ -344,14 +354,13 @@ export function GameApp() {
       const cfg = DIFFICULTY_STAGES[
         Math.min(state.difficultyStage, DIFFICULTY_STAGES.length - 1)
       ]!;
-      const levelName = levelDisplayName(state.difficultyLevel);
       setStageToast(
-        `${levelName} · Stage ${state.difficultyStage + 1} · ${cfg.symbols}×${cfg.colors}`,
+        `Stage ${state.difficultyStage + 1} · ${cfg.symbols}×${cfg.colors} palette`,
       );
       window.setTimeout(() => setStageToast(null), 1800);
     }
     prevStageRef.current = state.difficultyStage;
-  }, [state.difficultyStage, state.difficultyLevel, view]);
+  }, [state.difficultyStage, view]);
 
   // First-time specials teach moments
   useEffect(() => {
@@ -396,21 +405,6 @@ export function GameApp() {
     setRejectId(null);
   }, []);
 
-  const beginEndless = (level: DifficultyLevel) => {
-    setSelectedLevel(level);
-    setHintIds([]);
-    setHintEdges([]);
-    setHintsLeft(STARTING_HINTS);
-    failedTriesRef.current = 0;
-    helpOfferedThisStreak.current = false;
-    lastClearsForFreeHint.current = 0;
-    clearPathUi();
-    clearSession();
-    setHasSession(false);
-    dispatch({ type: "REPLACE", state: newEndlessGame(level) });
-    setView("play");
-  };
-
   const startEndless = () => {
     setHintIds([]);
     setHintEdges([]);
@@ -427,12 +421,11 @@ export function GameApp() {
     }
     const saved = loadSession();
     if (saved && !saved.gameOver && saved.score >= 0) {
-      if (saved.difficultyLevel) setSelectedLevel(saved.difficultyLevel);
       dispatch({ type: "REPLACE", state: saved });
-      setView("play");
-      return;
+    } else {
+      dispatch({ type: "REPLACE", state: newEndlessGame() });
     }
-    setView("levels");
+    setView("play");
   };
 
   const startDaily = () => {
@@ -799,7 +792,8 @@ export function GameApp() {
     if (view === "tutorial" && tutorialStep >= 4 && state.stats.loopsCreated > 0) {
       const t = setTimeout(() => {
         setTutorialDone();
-        setView("levels");
+        dispatch({ type: "REPLACE", state: newEndlessGame() });
+        setView("play");
       }, 700);
       return () => clearTimeout(t);
     }
@@ -829,7 +823,6 @@ export function GameApp() {
             state.score,
             state.stats.loopsCreated,
             Math.max(1, state.stats.longestCombo),
-            levelDisplayName(state.difficultyLevel),
           );
     const ok = await shareText(text);
     setShareNote(ok ? "Copied / shared" : "Unable to share");
@@ -857,7 +850,8 @@ export function GameApp() {
                 clearSession();
                 setHasSession(false);
                 clearPathUi();
-                setView("levels");
+                dispatch({ type: "REPLACE", state: newEndlessGame() });
+                setView("play");
               }}
             >
               New Game
@@ -878,45 +872,6 @@ export function GameApp() {
               Statistics
             </GhostButton>
             <GhostButton onClick={() => setView("settings")}>Settings</GhostButton>
-          </div>
-        </main>
-      </Shell>
-    );
-  }
-
-  if (view === "levels") {
-    const blurb: Record<DifficultyLevel, string> = {
-      easy: "Smaller palette · almost no specials",
-      medium: "Mixed board · light locks & wilds",
-      hard: "Full palette · more specials",
-    };
-    return (
-      <Shell>
-        <header className="flex items-center justify-between py-2">
-          <GhostButton onClick={() => setView("home")}>← Back</GhostButton>
-        </header>
-        <main className="flex flex-1 flex-col items-center justify-center gap-6 py-8">
-          <div className="text-center">
-            <h2 className="font-[family-name:var(--font-display)] text-3xl font-semibold tracking-tight">
-              Choose level
-            </h2>
-            <p className="mt-2 text-sm text-[#1E2A32]/55">
-              Difficulty stays fixed for the run
-            </p>
-          </div>
-          <div className="flex w-full max-w-xs flex-col gap-3">
-            {(["easy", "medium", "hard"] as const).map((level) => (
-              <PrimaryButton
-                key={level}
-                onClick={() => beginEndless(level)}
-                className="w-full"
-              >
-                <span className="block text-lg">{LEVEL_PRESETS[level].label}</span>
-                <span className="mt-0.5 block text-xs font-normal opacity-70">
-                  {blurb[level]}
-                </span>
-              </PrimaryButton>
-            ))}
           </div>
         </main>
       </Shell>
@@ -1125,8 +1080,7 @@ export function GameApp() {
           </div>
           {!showDailyHud && (
             <div className="mt-0.5 text-[11px] text-[#1E2A32]/4">
-              {levelDisplayName(state.difficultyLevel)} · Stage{" "}
-              {state.difficultyStage + 1} ·{" "}
+              Stage {state.difficultyStage + 1} ·{" "}
               {
                 DIFFICULTY_STAGES[
                   Math.min(state.difficultyStage, DIFFICULTY_STAGES.length - 1)
@@ -1267,7 +1221,18 @@ export function GameApp() {
                 ? "Out of Moves"
                 : "GAME OVER"
           }
-          onClose={() => setView("home")}
+          onClose={() => {
+            if (
+              state.mode === "endless" &&
+              state.gameOver &&
+              state.recoveryUndosLeft > 0 &&
+              state.preClearSnapshot
+            ) {
+              // Closing recoverable GO without undoing = give up
+              dispatch({ type: "ACCEPT_GAME_OVER" });
+            }
+            setView("home");
+          }}
         >
           {state.dailySolved ? (
             <div className="mb-4 space-y-2 text-sm text-[#1E2A32]/65">
@@ -1301,53 +1266,124 @@ export function GameApp() {
               )}
             </div>
           ) : (
-            <dl className="mb-5 space-y-2 text-sm">
-              <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Score</dt>
-                <dd className="font-semibold tabular-nums">{state.score}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Best Score</dt>
-                <dd className="font-semibold tabular-nums">{best}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Largest loop</dt>
-                <dd className="font-semibold tabular-nums">
-                  {state.stats.largestLoop}
-                </dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Max combo</dt>
-                <dd className="font-semibold tabular-nums">
-                  ×{Math.max(1, state.stats.longestCombo)}
-                </dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Hints left</dt>
-                <dd className="font-semibold tabular-nums">{hintsLeft}</dd>
-              </div>
-            </dl>
+            <div className="mb-5 space-y-3">
+              {state.mode === "endless" && (
+                <p className="text-sm text-[#1E2A32]/65">
+                  No connections left.
+                  {state.recoveryUndosLeft > 0 && state.preClearSnapshot
+                    ? " A longer loop might have kept you alive — undo and try again?"
+                    : ""}
+                </p>
+              )}
+              <dl className="space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <dt className="text-[#1E2A32]/5">Score</dt>
+                  <dd className="font-semibold tabular-nums">{state.score}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-[#1E2A32]/5">Best Score</dt>
+                  <dd className="font-semibold tabular-nums">{best}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-[#1E2A32]/5">Largest loop</dt>
+                  <dd className="font-semibold tabular-nums">
+                    {state.stats.largestLoop}
+                  </dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-[#1E2A32]/5">Max combo</dt>
+                  <dd className="font-semibold tabular-nums">
+                    ×{Math.max(1, state.stats.longestCombo)}
+                  </dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-[#1E2A32]/5">Hints left</dt>
+                  <dd className="font-semibold tabular-nums">{hintsLeft}</dd>
+                </div>
+              </dl>
+            </div>
           )}
           <div className="flex flex-col gap-2">
-            <PrimaryButton
-              onClick={() => {
-                recordedGameOver.current = false;
-                setHintIds([]);
-                setHintEdges([]);
-                setHintsLeft(STARTING_HINTS);
-                clearPathUi();
-                clearSession();
-                if (state.mode === "daily") startDaily();
-                else {
-                  beginEndless(state.difficultyLevel ?? selectedLevel);
-                }
-              }}
-            >
-              Play Again
-            </PrimaryButton>
-            <GhostButton onClick={onShare}>Share Score</GhostButton>
-            {shareNote && (
-              <p className="text-center text-xs text-[#2A9D8F]">{shareNote}</p>
+            {state.mode === "endless" &&
+            state.gameOver &&
+            state.recoveryUndosLeft > 0 &&
+            state.preClearSnapshot ? (
+              <>
+                <PrimaryButton
+                  onClick={() => {
+                    dispatch({ type: "RECOVER_UNDO" });
+                    clearPathUi();
+                    setHintIds([]);
+                    setHintEdges([]);
+                    playSfx("select", settings.sound);
+                  }}
+                >
+                  Undo ({state.recoveryUndosLeft} left)
+                </PrimaryButton>
+                <GhostButton
+                  onClick={() => {
+                    // Finalize run stats, then start a new endless game
+                    if (!recordedGameOver.current) {
+                      recordedGameOver.current = true;
+                      playSfx("gameover", settings.sound);
+                      haptic(settings.haptics, [30, 40, 30]);
+                      const s = loadStats();
+                      s.gamesPlayed += 1;
+                      s.totalScore += state.score;
+                      s.bestScore = Math.max(s.bestScore, state.score);
+                      s.totalLoops += state.stats.loopsCreated;
+                      s.largestLoop = Math.max(
+                        s.largestLoop,
+                        state.stats.largestLoop,
+                      );
+                      s.bestCombo = Math.max(
+                        s.bestCombo,
+                        state.stats.longestCombo,
+                      );
+                      s.totalConnections += state.stats.totalConnections;
+                      saveStats(s);
+                      setBest(s.bestScore);
+                      setStats(s);
+                    }
+                    setHintIds([]);
+                    setHintEdges([]);
+                    setHintsLeft(STARTING_HINTS);
+                    clearPathUi();
+                    clearSession();
+                    dispatch({ type: "REPLACE", state: newEndlessGame() });
+                    setView("play");
+                    recordedGameOver.current = false;
+                  }}
+                >
+                  Give up
+                </GhostButton>
+              </>
+            ) : (
+              <>
+                <PrimaryButton
+                  onClick={() => {
+                    recordedGameOver.current = false;
+                    setHintIds([]);
+                    setHintEdges([]);
+                    setHintsLeft(STARTING_HINTS);
+                    clearPathUi();
+                    clearSession();
+                    if (state.mode === "daily") startDaily();
+                    else {
+                      dispatch({ type: "REPLACE", state: newEndlessGame() });
+                      setView("play");
+                    }
+                  }}
+                >
+                  Play Again
+                </PrimaryButton>
+                <GhostButton onClick={onShare}>Share Score</GhostButton>
+                {shareNote && (
+                  <p className="text-center text-xs text-[#2A9D8F]">
+                    {shareNote}
+                  </p>
+                )}
+              </>
             )}
           </div>
         </Modal>

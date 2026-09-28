@@ -43,15 +43,10 @@ export const DIFFICULTY_STAGES = [
 
 export const CLEARS_PER_STAGE = 4;
 
-/** Endless Easy / Medium / Hard presets (index into DIFFICULTY_STAGES). */
-export const LEVEL_PRESETS = {
-  easy: { startStage: 0, maxStage: 1, label: "Easy" },
-  medium: { startStage: 1, maxStage: 3, label: "Medium" },
-  hard: { startStage: 3, maxStage: 4, label: "Hard" },
-} as const;
-
-/** Starting undo charges (path cancel / REVERT stays free). */
+/** Starting undo charges (legacy / path systems). */
 export const STARTING_UNDOS = 3;
+/** Softlock recovery undos offered from the Game Over screen (Endless). */
+export const STARTING_RECOVERY_UNDOS = 3;
 /** Earn an undo charge when clearing a loop of this size or larger. */
 export const UNDO_EARN_LOOP_SIZE = 6;
 export const MAX_UNDOS = 5;

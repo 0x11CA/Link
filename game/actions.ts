@@ -13,8 +13,8 @@ import { validateConnection } from "@/game/connections";
 import {
   DAILY_MOVE_LIMIT,
   GRID_SIZE,
-  LEVEL_PRESETS,
   MAX_UNDOS,
+  STARTING_RECOVERY_UNDOS,
   STARTING_UNDOS,
   UNDO_EARN_LOOP_SIZE,
 } from "@/game/config";
@@ -25,14 +25,12 @@ import {
   updateDailyProgress,
 } from "@/game/dailyObjectives";
 import { nextDifficultyStage } from "@/game/difficulty";
-import { isGameOver } from "@/game/gameOver";
+import { hasLegalMoves } from "@/game/gameOver";
 import { findCycleClosedByEdge } from "@/game/loops";
 import { createRng } from "@/game/rng";
-import { ensureCompletableRoute } from "@/game/routes";
 import { scoreLoop } from "@/game/scoring";
 import type {
   ColorId,
-  DifficultyLevel,
   GameAction,
   GameMode,
   GameState,
@@ -92,6 +90,14 @@ function restore(state: GameState, snap: HistorySnapshot): GameState {
   };
 }
 
+function clearAllConnections(
+  board: (Tile | null)[][],
+): (Tile | null)[][] {
+  return board.map((row) =>
+    row.map((cell) => (cell ? { ...cell, connections: [] } : null)),
+  );
+}
+
 function withGameOverCheck(state: GameState): GameState {
   if (state.mode === "daily") {
     if (isBoardEmpty(state.board)) {
@@ -100,6 +106,7 @@ function withGameOverCheck(state: GameState): GameState {
         dailySolved: true,
         gameOver: false,
         message: "Solved!",
+        preClearSnapshot: null,
       };
     }
     if (state.moveCount >= state.dailyMoveLimit && !isBoardEmpty(state.board)) {
@@ -108,29 +115,29 @@ function withGameOverCheck(state: GameState): GameState {
         dailyFailed: true,
         gameOver: true,
         message: "Out of moves",
+        preClearSnapshot: null,
       };
     }
     return state;
   }
 
-  // Endless: if stuck, plant a guaranteed route instead of ending the game
-  if (isGameOver(state)) {
-    const rng = createRng(state.rngState ^ 0xdecaf);
-    const repaired = ensureCompletableRoute(
-      state.board,
-      rng,
-      state.difficultyStage,
-    );
+  // Endless: softlock ends the run immediately (no free route plant)
+  if (!hasLegalMoves(state)) {
     return {
       ...state,
-      board: repaired,
-      gameOver: false,
+      gameOver: true,
       selectedId: null,
-      message: null,
-      rngState: (Math.floor(rng() * 1e9) ^ state.rngState) >>> 0,
+      message: "No moves left",
+      // Keep preClearSnapshot when present so recovery Undo can rewind
     };
   }
-  return state;
+
+  // Still playable — drop recovery snapshot from the last clear
+  return {
+    ...state,
+    gameOver: false,
+    preClearSnapshot: null,
+  };
 }
 
 export function isBoardEmpty(board: (Tile | null)[][]): boolean {
@@ -169,21 +176,12 @@ export interface CreateStateOptions {
   rngState?: number;
   dailyMoveLimit?: number;
   difficultyStage?: number;
-  difficultyLevel?: DifficultyLevel | null;
 }
 
 export function createInitialState(opts: CreateStateOptions = {}): GameState {
   const mode = opts.mode ?? "endless";
   const seed = opts.seed ?? (Date.now() >>> 0);
-  const difficultyLevel =
-    opts.difficultyLevel !== undefined
-      ? opts.difficultyLevel
-      : mode === "endless"
-        ? ("medium" as DifficultyLevel)
-        : null;
-  const stage =
-    opts.difficultyStage ??
-    (difficultyLevel ? LEVEL_PRESETS[difficultyLevel].startStage : 0);
+  const stage = opts.difficultyStage ?? 0;
 
   let board = opts.board;
   let rngState = opts.rngState;
@@ -219,9 +217,10 @@ export function createInitialState(opts: CreateStateOptions = {}): GameState {
     seed,
     rngState,
     message: null,
-    difficultyLevel,
     dailyObjectives: null,
     dailyProgress: null,
+    recoveryUndosLeft: mode === "endless" ? STARTING_RECOVERY_UNDOS : 0,
+    preClearSnapshot: null,
   };
 }
 
@@ -240,6 +239,34 @@ function addConnection(
 }
 
 export function reduce(state: GameState, action: GameAction): GameState {
+  if (action.type === "RECOVER_UNDO") {
+    if (state.mode !== "endless") return state;
+    if (!state.gameOver) return state;
+    if (state.recoveryUndosLeft <= 0 || !state.preClearSnapshot) return state;
+    const restored = restore(state, state.preClearSnapshot);
+    return {
+      ...restored,
+      board: clearAllConnections(restored.board),
+      gameOver: false,
+      recoveryUndosLeft: state.recoveryUndosLeft - 1,
+      preClearSnapshot: null,
+      history: [],
+      selectedId: null,
+      message: null,
+      dailyObjectives: state.dailyObjectives,
+      dailyProgress: state.dailyProgress,
+    };
+  }
+
+  if (action.type === "ACCEPT_GAME_OVER") {
+    if (!state.gameOver) return state;
+    return {
+      ...state,
+      preClearSnapshot: null,
+      message: state.message ?? "No moves left",
+    };
+  }
+
   if (
     state.gameOver &&
     action.type !== "UNDO" &&
@@ -322,7 +349,8 @@ export function reduce(state: GameState, action: GameAction): GameState {
         };
       }
 
-      const hist = [...state.history, snapshot(state)];
+      const beforeConnect = snapshot(state);
+      const hist = [...state.history, beforeConnect];
       let board = addConnection(state.board, action.fromId, action.toId);
       const cycle = findCycleClosedByEdge(board, action.fromId, action.toId);
 
@@ -369,10 +397,7 @@ export function reduce(state: GameState, action: GameAction): GameState {
       let afterRemove = removeTiles(unlockedBoard, cleared);
 
       const rng = createRng(state.rngState);
-      const nextStage = nextDifficultyStage(
-        state.clearsCount + 1,
-        state.difficultyLevel,
-      );
+      const nextStage = nextDifficultyStage(state.clearsCount + 1);
       if (state.mode === "daily") {
         afterRemove = applyGravityDaily(afterRemove);
       } else {
@@ -408,7 +433,7 @@ export function reduce(state: GameState, action: GameAction): GameState {
 
       next = {
         ...next,
-        // Loop is committed — cannot undo / go back past a clear
+        // Loop is committed — path history cleared; softlock can still recover via preClearSnapshot
         history: [],
         board: afterRemove,
         score: newScore,
@@ -421,6 +446,7 @@ export function reduce(state: GameState, action: GameAction): GameState {
         lastScoreGain: gain,
         lastClearedIds: [...cycle],
         lastClearPositions: clearPositions,
+        preClearSnapshot: beforeConnect,
         dailyProgress,
         stats: {
           loopsCreated: state.stats.loopsCreated + 1,
@@ -437,14 +463,10 @@ export function reduce(state: GameState, action: GameAction): GameState {
   }
 }
 
-export function newEndlessGame(
-  level: DifficultyLevel = "medium",
-  seed?: number,
-): GameState {
+export function newEndlessGame(seed?: number): GameState {
   resetTileSeq(0);
   return createInitialState({
     mode: "endless",
-    difficultyLevel: level,
     seed: seed ?? (Date.now() ^ (Math.random() * 1e9)) >>> 0,
   });
 }
@@ -454,7 +476,6 @@ export function newDailyGame(dateStr: string): GameState {
   const objectives = createDailyObjectives(dateStr);
   const state = createInitialState({
     mode: "daily",
-    difficultyLevel: null,
     seed,
     board,
     rngState,

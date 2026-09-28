@@ -76,10 +76,8 @@ export function formatEndlessShare(
   score: number,
   loops: number,
   maxCombo = 1,
-  levelLabel?: string,
 ): string {
-  const levelBit = levelLabel ? ` · ${levelLabel}` : "";
-  return `LINK${levelBit} — scored ${score} with ${loops} loops (combo ×${maxCombo}). Create. Connect. Clear.`;
+  return `LINK — scored ${score} with ${loops} loops (combo ×${maxCombo}). Create. Connect. Clear.`;
 }
 
 /** Calendar strip for the last `days` days ending today. */

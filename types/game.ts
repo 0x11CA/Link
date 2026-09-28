@@ -2,7 +2,6 @@ export type SymbolId = "circle" | "triangle" | "square" | "diamond";
 export type ColorId = "coral" | "teal" | "indigo" | "amber";
 export type TileId = string;
 export type GameMode = "endless" | "daily";
-export type DifficultyLevel = "easy" | "medium" | "hard";
 
 export interface Tile {
   id: TileId;
@@ -92,11 +91,13 @@ export interface GameState {
   seed: number;
   rngState: number;
   message: string | null;
-  /** Endless difficulty preset; null for daily. */
-  difficultyLevel: DifficultyLevel | null;
   /** Present in daily mode. */
   dailyObjectives: DailyObjectives | null;
   dailyProgress: DailyProgress | null;
+  /** Endless: undos left to recover from softlock Game Over (max 3 per run). */
+  recoveryUndosLeft: number;
+  /** Board/score before the clear that may have softlocked; used by RECOVER_UNDO. */
+  preClearSnapshot: HistorySnapshot | null;
 }
 
 export type GameAction =
@@ -105,6 +106,10 @@ export type GameAction =
   | { type: "UNDO" }
   /** Undo last connection without spending an undo charge (path backtrack / cancel). */
   | { type: "REVERT" }
+  /** Endless: rewind softlock using a recovery undo charge. */
+  | { type: "RECOVER_UNDO" }
+  /** Endless: decline recovery and finalize game over. */
+  | { type: "ACCEPT_GAME_OVER" }
   | { type: "CLEAR_SELECTION" }
   | { type: "DISMISS_MESSAGE" };
 

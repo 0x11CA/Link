@@ -188,13 +188,18 @@ export function loadSession(): GameState | null {
     );
     if (parsed.dailyObjectives === undefined) parsed.dailyObjectives = null;
     if (parsed.dailyProgress === undefined) parsed.dailyProgress = null;
-    if (parsed.difficultyLevel === undefined) {
-      parsed.difficultyLevel = parsed.mode === "endless" ? "medium" : null;
-    }
     if (!Array.isArray(parsed.lastClearPositions)) {
       parsed.lastClearPositions = [];
     }
     if (typeof parsed.undosLeft !== "number") parsed.undosLeft = 3;
+    if (typeof parsed.recoveryUndosLeft !== "number") {
+      parsed.recoveryUndosLeft = 3;
+    }
+    if (parsed.preClearSnapshot === undefined) {
+      parsed.preClearSnapshot = null;
+    }
+    // Drop legacy level field if present
+    delete (parsed as { difficultyLevel?: unknown }).difficultyLevel;
     return parsed;
   } catch {
     return null;

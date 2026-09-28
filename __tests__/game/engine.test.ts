@@ -10,8 +10,6 @@ import { validateConnection, listLegalConnections } from "@/game/connections";
 import { MAX_CONNECTIONS, MIN_LOOP_SIZE } from "@/game/config";
 import { findCycleClosedByEdge } from "@/game/loops";
 import { baseScoreForLoop, scoreLoop } from "@/game/scoring";
-import { nextDifficultyStage } from "@/game/difficulty";
-import { LEVEL_PRESETS } from "@/game/config";
 import {
   createInitialState,
   newDailyGame,
@@ -251,6 +249,230 @@ describe("game over", () => {
     expect(hasLegalMoves(state)).toBe(false);
     expect(isGameOver(state)).toBe(true);
   });
+
+  it("endless softlock sets gameOver without repairing the board", () => {
+    // Only one legal pair; everything else locked → connect ends the run
+    const board = Array.from({ length: 5 }, (_, r) =>
+      Array.from({ length: 5 }, (_, c) =>
+        tile({
+          id: `t${r}-${c}`,
+          row: r,
+          col: c,
+          symbol: "circle",
+          color: "coral",
+          locked: true,
+        }),
+      ),
+    );
+    board[0]![0] = tile({
+      id: "a",
+      row: 0,
+      col: 0,
+      symbol: "circle",
+      color: "coral",
+      locked: false,
+    });
+    board[0]![1] = tile({
+      id: "b",
+      row: 0,
+      col: 1,
+      symbol: "circle",
+      color: "teal",
+      locked: false,
+    });
+    let state = stateFromBoard(board);
+    expect(state.recoveryUndosLeft).toBe(3);
+    state = reduce(state, { type: "CONNECT", fromId: "a", toId: "b" });
+    expect(state.gameOver).toBe(true);
+    expect(state.message).toBe("No moves left");
+    // Board was not auto-planted with a fresh 2x2
+    expect(state.board[1]![1]!.locked).toBe(true);
+    expect(state.board[1]![1]!.id).toBe("t1-1");
+  });
+
+  it("recover undo restores pre-clear board and spends a charge", () => {
+    const playable = Array.from({ length: 5 }, (_, r) =>
+      Array.from({ length: 5 }, (_, c) =>
+        tile({
+          id: `p${r}-${c}`,
+          row: r,
+          col: c,
+          symbol: "circle",
+          color: "coral",
+          locked: false,
+        }),
+      ),
+    );
+    // Make a distinct before-clear board
+    playable[0]![0] = tile({
+      id: "keep-a",
+      row: 0,
+      col: 0,
+      symbol: "diamond",
+      color: "amber",
+      locked: false,
+      connections: ["keep-b"],
+    });
+    playable[0]![1] = tile({
+      id: "keep-b",
+      row: 0,
+      col: 1,
+      symbol: "diamond",
+      color: "teal",
+      locked: false,
+      connections: ["keep-a"],
+    });
+
+    const stuck = Array.from({ length: 5 }, (_, r) =>
+      Array.from({ length: 5 }, (_, c) =>
+        tile({
+          id: `s${r}-${c}`,
+          row: r,
+          col: c,
+          symbol: "circle",
+          color: "coral",
+          locked: true,
+        }),
+      ),
+    );
+
+    const before: GameState = {
+      ...stateFromBoard(playable),
+      score: 40,
+      clearsCount: 1,
+    };
+    const softlocked: GameState = {
+      ...stateFromBoard(stuck),
+      score: 100,
+      gameOver: true,
+      message: "No moves left",
+      recoveryUndosLeft: 3,
+      preClearSnapshot: {
+        board: cloneBoard(before.board),
+        score: before.score,
+        combo: before.combo,
+        undosLeft: before.undosLeft,
+        difficultyStage: before.difficultyStage,
+        clearsCount: before.clearsCount,
+        stats: { ...before.stats },
+        moveCount: before.moveCount,
+        dailySolved: false,
+        gameOver: false,
+        lastClearSize: null,
+        lastScoreGain: null,
+        closedLoop: false,
+      },
+    };
+
+    const recovered = reduce(softlocked, { type: "RECOVER_UNDO" });
+    expect(recovered.gameOver).toBe(false);
+    expect(recovered.recoveryUndosLeft).toBe(2);
+    expect(recovered.preClearSnapshot).toBeNull();
+    expect(recovered.score).toBe(40);
+    expect(recovered.board[0]![0]!.id).toBe("keep-a");
+    // Connections cleared so the player can try a different path
+    expect(recovered.board[0]![0]!.connections).toEqual([]);
+    expect(recovered.board[0]![1]!.connections).toEqual([]);
+  });
+
+  it("after 3 recovers, further recover is denied", () => {
+    const makeSnap = (tag: string) => ({
+      board: Array.from({ length: 5 }, (_, r) =>
+        Array.from({ length: 5 }, (_, c) =>
+          tile({
+            id: `${tag}-${r}-${c}`,
+            row: r,
+            col: c,
+            symbol: "square" as const,
+            color: "indigo" as const,
+          }),
+        ),
+      ),
+      score: 10,
+      combo: 1,
+      undosLeft: 3,
+      difficultyStage: 0,
+      clearsCount: 0,
+      stats: {
+        loopsCreated: 0,
+        largestLoop: 0,
+        longestCombo: 0,
+        totalConnections: 0,
+      },
+      moveCount: 0,
+      dailySolved: false,
+      gameOver: false,
+      lastClearSize: null,
+      lastScoreGain: null,
+      closedLoop: false,
+    });
+
+    const stuckBoard = Array.from({ length: 5 }, (_, r) =>
+      Array.from({ length: 5 }, (_, c) =>
+        tile({
+          id: `x${r}-${c}`,
+          row: r,
+          col: c,
+          symbol: "circle",
+          color: "coral",
+          locked: true,
+        }),
+      ),
+    );
+
+    let state: GameState = {
+      ...stateFromBoard(stuckBoard),
+      gameOver: true,
+      recoveryUndosLeft: 3,
+      preClearSnapshot: makeSnap("a"),
+    };
+    state = reduce(state, { type: "RECOVER_UNDO" });
+    expect(state.recoveryUndosLeft).toBe(2);
+
+    state = {
+      ...state,
+      gameOver: true,
+      board: stuckBoard,
+      preClearSnapshot: makeSnap("b"),
+    };
+    state = reduce(state, { type: "RECOVER_UNDO" });
+    expect(state.recoveryUndosLeft).toBe(1);
+
+    state = {
+      ...state,
+      gameOver: true,
+      board: stuckBoard,
+      preClearSnapshot: makeSnap("c"),
+    };
+    state = reduce(state, { type: "RECOVER_UNDO" });
+    expect(state.recoveryUndosLeft).toBe(0);
+    expect(state.gameOver).toBe(false);
+
+    // Softlock again with a snapshot but no charges left
+    state = {
+      ...state,
+      gameOver: true,
+      board: stuckBoard,
+      preClearSnapshot: makeSnap("d"),
+      message: "No moves left",
+    };
+    const denied = reduce(state, { type: "RECOVER_UNDO" });
+    expect(denied.recoveryUndosLeft).toBe(0);
+    expect(denied.gameOver).toBe(true);
+    expect(denied.preClearSnapshot).not.toBeNull();
+
+    const accepted = reduce(denied, { type: "ACCEPT_GAME_OVER" });
+    expect(accepted.preClearSnapshot).toBeNull();
+    expect(accepted.gameOver).toBe(true);
+  });
+
+  it("new endless game starts with 3 recovery undos and legal moves", () => {
+    const state = newEndlessGame(42);
+    expect(state.recoveryUndosLeft).toBe(3);
+    expect(state.preClearSnapshot).toBeNull();
+    expect(hasLegalMoves(state)).toBe(true);
+    expect(state.gameOver).toBe(false);
+  });
 });
 
 describe("daily seeds", () => {
@@ -327,13 +549,16 @@ describe("reduce connect + clear", () => {
     expect(state.lastClearSize).toBe(4);
     // Loop is final — no undo trail past a clear
     expect(state.history.length).toBe(0);
+    // Playable after clear → recovery snapshot discarded
+    expect(state.preClearSnapshot).toBeNull();
+    expect(state.gameOver).toBe(false);
     const afterUndo = reduce(state, { type: "UNDO" });
     expect(afterUndo.score).toBe(60);
     expect(afterUndo.stats.loopsCreated).toBe(1);
   });
 
   it("never exceeds max connections", () => {
-    const state = newEndlessGame("medium", 99);
+    const state = newEndlessGame(99);
     for (const row of state.board) {
       for (const t of row) {
         if (t) expect(t.connections.length).toBeLessThanOrEqual(MAX_CONNECTIONS);
@@ -377,7 +602,7 @@ describe("always a route", () => {
   it("new boards always have a clearable 2x2", async () => {
     const { hasClearableTwoByTwo } = await import("@/game/routes");
     for (let i = 0; i < 50; i++) {
-      const state = newEndlessGame("medium", (i * 99991) >>> 0);
+      const state = newEndlessGame((i * 99991) >>> 0);
       expect(hasClearableTwoByTwo(state.board)).toBe(true);
     }
   });
@@ -403,6 +628,29 @@ describe("always a route", () => {
     expect(hasClearableTwoByTwo(board)).toBe(false);
     const fixed = ensureCompletableRoute(board, createRng(1), 0);
     expect(hasClearableTwoByTwo(fixed)).toBe(true);
+  });
+
+  it("post-clear refill does not plant a rescue route", async () => {
+    const { applyGravityAndRefill } = await import("@/game/board");
+    const { hasClearableTwoByTwo } = await import("@/game/routes");
+    const { createRng } = await import("@/game/rng");
+    // Full locked board — no empties to refill; previously plant would unlock a 2x2
+    const board = Array.from({ length: 5 }, (_, r) =>
+      Array.from({ length: 5 }, (_, c) =>
+        tile({
+          id: `F${r}-${c}`,
+          row: r,
+          col: c,
+          symbol: "circle",
+          color: "coral",
+          locked: true,
+        }),
+      ),
+    );
+    const refilled = applyGravityAndRefill(board, createRng(7), 0, true);
+    expect(hasClearableTwoByTwo(refilled)).toBe(false);
+    expect(refilled[0]![0]!.locked).toBe(true);
+    expect(refilled[0]![0]!.id).toBe("F0-0");
   });
 });
 
@@ -549,32 +797,5 @@ describe("fever scoring and undos", () => {
     expect(daily.dailyObjectives).not.toBeNull();
     expect(daily.dailyProgress).not.toBeNull();
     expect(daily.dailyObjectives!.minLoopSize).toBeGreaterThanOrEqual(4);
-  });
-});
-
-describe("difficulty levels", () => {
-  it("easy starts at stage 0 and never exceeds max stage 1", () => {
-    const state = newEndlessGame("easy", 42);
-    expect(state.difficultyLevel).toBe("easy");
-    expect(state.difficultyStage).toBe(LEVEL_PRESETS.easy.startStage);
-    expect(nextDifficultyStage(0, "easy")).toBe(0);
-    expect(nextDifficultyStage(4, "easy")).toBe(1);
-    expect(nextDifficultyStage(40, "easy")).toBe(LEVEL_PRESETS.easy.maxStage);
-  });
-
-  it("hard starts at stage 3 and caps at 4", () => {
-    const state = newEndlessGame("hard", 7);
-    expect(state.difficultyStage).toBe(LEVEL_PRESETS.hard.startStage);
-    expect(nextDifficultyStage(0, "hard")).toBe(3);
-    expect(nextDifficultyStage(4, "hard")).toBe(4);
-    expect(nextDifficultyStage(99, "hard")).toBe(LEVEL_PRESETS.hard.maxStage);
-  });
-
-  it("medium sits between easy and hard start stages", () => {
-    const easy = newEndlessGame("easy", 1);
-    const medium = newEndlessGame("medium", 1);
-    const hard = newEndlessGame("hard", 1);
-    expect(easy.difficultyStage).toBeLessThan(medium.difficultyStage);
-    expect(medium.difficultyStage).toBeLessThanOrEqual(hard.difficultyStage);
   });
 });

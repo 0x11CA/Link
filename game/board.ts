@@ -374,8 +374,8 @@ export function applyGravityAndRefill(
     }
   }
 
-  // Always leave at least one completable loop route
-  return ensureRouteInline(next, rng, stage);
+  // No forced plant — softlock after a clear is real game over
+  return next;
 }
 
 export function unlockAdjacentToCleared(
