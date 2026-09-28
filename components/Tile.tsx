@@ -58,6 +58,7 @@ interface TileProps {
   pathHead?: boolean;
   clearing?: boolean;
   rejectShake?: boolean;
+  guidePulse?: boolean;
 }
 
 export function Tile({
@@ -68,24 +69,32 @@ export function Tile({
   pathHead,
   clearing,
   rejectShake,
+  guidePulse,
 }: TileProps) {
   const accent = COLOR_HEX[tile.color];
 
   return (
     <div
-      aria-label={`${tile.wild ? "wild" : tile.symbol} ${tile.color}${tile.locked ? " locked" : ""}`}
+      aria-label={`${tile.wild ? "wild" : tile.bridge ? "bridge" : tile.symbol} ${tile.color}${tile.locked ? " locked" : ""}`}
       role="img"
       className={[
-        "relative aspect-square w-full rounded-2xl border border-black/5 bg-[#FBFBFA]",
+        "relative aspect-square w-full rounded-xl border border-black/5 bg-[#FBFBFA]",
         "shadow-[0_2px_8px_rgba(30,40,50,0.08)]",
         "flex items-center justify-center transition-transform duration-150 ease-out",
         "touch-manipulation select-none pointer-events-none",
         selected || pathHead ? "scale-105 z-10 ring-2 ring-[#1E2A32]/25" : "",
         inPath && !pathHead ? "ring-2 ring-[#2A9D8F]/35 scale-[1.02]" : "",
         highlighted ? "ring-2 ring-[#2A9D8F]/50" : "",
+        guidePulse
+          ? "z-20 scale-110 ring-2 ring-[#E9A319] animate-[guidePulse_500ms_ease-in-out]"
+          : "",
         clearing ? "scale-0 opacity-0" : "",
         tile.locked ? "opacity-70" : "",
         rejectShake ? "animate-[tileShake_280ms_ease-in-out]" : "",
+        tile.wild && !tile.locked
+          ? "animate-[wildShimmer_1.8s_ease-in-out_infinite]"
+          : "",
+        tile.bridge && !tile.locked ? "ring-1 ring-[#4A6FA5]/35" : "",
       ].join(" ")}
       style={{ transitionDuration: clearing ? "220ms" : "150ms" }}
     >
@@ -99,6 +108,14 @@ export function Tile({
       {tile.wild && !tile.locked && (
         <span className="absolute bottom-1 right-1.5 text-[10px] font-medium text-[#1E2A32]/40">
           ★
+        </span>
+      )}
+      {tile.bridge && !tile.locked && !tile.wild && (
+        <span
+          className="absolute bottom-1 right-1.5 text-[10px] font-semibold text-[#4A6FA5]/70"
+          aria-hidden
+        >
+          ↗
         </span>
       )}
     </div>

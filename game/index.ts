@@ -7,6 +7,7 @@ export {
   cloneBoard,
   findTile,
 } from "@/game/board";
+export { ensureCompletableRoute, hasClearableTwoByTwo } from "@/game/routes";
 export * from "@/game/connections";
 export * from "@/game/loops";
 export * from "@/game/scoring";
@@ -24,6 +25,7 @@ export {
   createDailyState,
   formatDailyShare,
   formatEndlessShare,
+  streakCalendarMarks,
 } from "@/game/daily";
 export {
   dailySeed,

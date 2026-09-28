@@ -13,15 +13,26 @@ import { validateConnection } from "@/game/connections";
 import {
   DAILY_MOVE_LIMIT,
   GRID_SIZE,
+  LEVEL_PRESETS,
+  MAX_UNDOS,
   STARTING_UNDOS,
+  UNDO_EARN_LOOP_SIZE,
 } from "@/game/config";
 import { generateDailyBoard, dailyMoveLimitFor } from "@/game/dailyBoard";
+import {
+  createDailyObjectives,
+  emptyDailyProgress,
+  updateDailyProgress,
+} from "@/game/dailyObjectives";
 import { nextDifficultyStage } from "@/game/difficulty";
 import { isGameOver } from "@/game/gameOver";
 import { findCycleClosedByEdge } from "@/game/loops";
 import { createRng } from "@/game/rng";
+import { ensureCompletableRoute } from "@/game/routes";
 import { scoreLoop } from "@/game/scoring";
 import type {
+  ColorId,
+  DifficultyLevel,
   GameAction,
   GameMode,
   GameState,
@@ -71,9 +82,11 @@ function restore(state: GameState, snap: HistorySnapshot): GameState {
     moveCount: snap.moveCount,
     dailySolved: snap.dailySolved,
     gameOver: snap.gameOver,
-    lastClearSize: snap.lastClearSize,
-    lastScoreGain: snap.lastScoreGain,
+    // Never revive clear FX / score floaters from history
+    lastClearSize: null,
+    lastScoreGain: null,
     lastClearedIds: [],
+    lastClearPositions: [],
     selectedId: null,
     message: null,
   };
@@ -97,9 +110,25 @@ function withGameOverCheck(state: GameState): GameState {
         message: "Out of moves",
       };
     }
+    return state;
   }
+
+  // Endless: if stuck, plant a guaranteed route instead of ending the game
   if (isGameOver(state)) {
-    return { ...state, gameOver: true, message: "GAME OVER" };
+    const rng = createRng(state.rngState ^ 0xdecaf);
+    const repaired = ensureCompletableRoute(
+      state.board,
+      rng,
+      state.difficultyStage,
+    );
+    return {
+      ...state,
+      board: repaired,
+      gameOver: false,
+      selectedId: null,
+      message: null,
+      rngState: (Math.floor(rng() * 1e9) ^ state.rngState) >>> 0,
+    };
   }
   return state;
 }
@@ -140,12 +169,21 @@ export interface CreateStateOptions {
   rngState?: number;
   dailyMoveLimit?: number;
   difficultyStage?: number;
+  difficultyLevel?: DifficultyLevel | null;
 }
 
 export function createInitialState(opts: CreateStateOptions = {}): GameState {
   const mode = opts.mode ?? "endless";
   const seed = opts.seed ?? (Date.now() >>> 0);
-  const stage = opts.difficultyStage ?? 0;
+  const difficultyLevel =
+    opts.difficultyLevel !== undefined
+      ? opts.difficultyLevel
+      : mode === "endless"
+        ? ("medium" as DifficultyLevel)
+        : null;
+  const stage =
+    opts.difficultyStage ??
+    (difficultyLevel ? LEVEL_PRESETS[difficultyLevel].startStage : 0);
 
   let board = opts.board;
   let rngState = opts.rngState;
@@ -172,6 +210,7 @@ export function createInitialState(opts: CreateStateOptions = {}): GameState {
     lastClearSize: null,
     lastScoreGain: null,
     lastClearedIds: [],
+    lastClearPositions: [],
     moveCount: 0,
     dailyMoveLimit: opts.dailyMoveLimit ?? DAILY_MOVE_LIMIT,
     dailySolved: false,
@@ -180,6 +219,9 @@ export function createInitialState(opts: CreateStateOptions = {}): GameState {
     seed,
     rngState,
     message: null,
+    difficultyLevel,
+    dailyObjectives: null,
+    dailyProgress: null,
   };
 }
 
@@ -235,6 +277,7 @@ export function reduce(state: GameState, action: GameAction): GameState {
     }
     case "UNDO": {
       if (state.history.length === 0) return state;
+      if (state.undosLeft <= 0) return state;
       const prev = state.history[state.history.length - 1]!;
       const restored = restore(state, prev);
       return {
@@ -242,10 +285,12 @@ export function reduce(state: GameState, action: GameAction): GameState {
         // Daily: undoing does not refund spent moves
         moveCount:
           state.mode === "daily" ? state.moveCount : restored.moveCount,
-        undosLeft: state.undosLeft,
+        undosLeft: state.undosLeft - 1,
         history: state.history.slice(0, -1),
         combo: 1,
         message: null,
+        dailyObjectives: state.dailyObjectives,
+        dailyProgress: state.dailyProgress,
       };
     }
     case "REVERT": {
@@ -259,6 +304,8 @@ export function reduce(state: GameState, action: GameAction): GameState {
         undosLeft: state.undosLeft,
         history: state.history.slice(0, -1),
         message: null,
+        dailyObjectives: state.dailyObjectives,
+        dailyProgress: state.dailyProgress,
       };
     }
     case "CONNECT": {
@@ -305,38 +352,76 @@ export function reduce(state: GameState, action: GameAction): GameState {
       const size = cycle.length;
       const gain = scoreLoop(size, state.combo);
       const cleared = new Set(cycle);
+      const clearPositions = cycle.map((id) => {
+        const t = findTile(board, id)!;
+        return {
+          id,
+          row: t.row,
+          col: t.col,
+          color: t.color as ColorId,
+        };
+      });
+      const wildsInLoop = clearPositions.reduce((n, p) => {
+        const t = findTile(board, p.id);
+        return n + (t?.wild ? 1 : 0);
+      }, 0);
       const unlockedBoard = unlockAdjacentToCleared(board, cleared);
       let afterRemove = removeTiles(unlockedBoard, cleared);
 
       const rng = createRng(state.rngState);
+      const nextStage = nextDifficultyStage(
+        state.clearsCount + 1,
+        state.difficultyLevel,
+      );
       if (state.mode === "daily") {
         afterRemove = applyGravityDaily(afterRemove);
       } else {
         afterRemove = applyGravityAndRefill(
           afterRemove,
           rng,
-          nextDifficultyStage(state.clearsCount + 1),
+          nextStage,
           true,
         );
       }
       const newRng = Math.floor(rng() * 1e9) ^ state.rngState;
 
       let undosLeft = state.undosLeft;
-      // Undo is unlimited — large loops no longer award undo charges.
+      if (size >= UNDO_EARN_LOOP_SIZE) {
+        undosLeft = Math.min(MAX_UNDOS, undosLeft + 1);
+      }
 
+      const newScore = state.score + gain;
       const newCombo = state.combo + 1;
+
+      let dailyProgress = state.dailyProgress;
+      if (state.dailyObjectives && state.dailyProgress) {
+        dailyProgress = updateDailyProgress(
+          state.dailyProgress,
+          state.dailyObjectives,
+          {
+            loopSize: size,
+            wildsInLoop,
+            score: newScore,
+          },
+        );
+      }
+
       next = {
         ...next,
+        // Loop is committed — cannot undo / go back past a clear
+        history: [],
         board: afterRemove,
-        score: state.score + gain,
+        score: newScore,
         combo: newCombo,
         undosLeft,
         clearsCount: state.clearsCount + 1,
-        difficultyStage: nextDifficultyStage(state.clearsCount + 1),
+        difficultyStage: nextStage,
         rngState: newRng >>> 0,
         lastClearSize: size,
         lastScoreGain: gain,
         lastClearedIds: [...cycle],
+        lastClearPositions: clearPositions,
+        dailyProgress,
         stats: {
           loopsCreated: state.stats.loopsCreated + 1,
           largestLoop: Math.max(state.stats.largestLoop, size),
@@ -352,23 +437,34 @@ export function reduce(state: GameState, action: GameAction): GameState {
   }
 }
 
-export function newEndlessGame(seed?: number): GameState {
+export function newEndlessGame(
+  level: DifficultyLevel = "medium",
+  seed?: number,
+): GameState {
   resetTileSeq(0);
   return createInitialState({
     mode: "endless",
+    difficultyLevel: level,
     seed: seed ?? (Date.now() ^ (Math.random() * 1e9)) >>> 0,
   });
 }
 
 export function newDailyGame(dateStr: string): GameState {
   const { board, seed, rngState, tileCount } = generateDailyBoard(dateStr);
-  return createInitialState({
+  const objectives = createDailyObjectives(dateStr);
+  const state = createInitialState({
     mode: "daily",
+    difficultyLevel: null,
     seed,
     board,
     rngState,
     dailyMoveLimit: dailyMoveLimitFor(tileCount),
   });
+  return {
+    ...state,
+    dailyObjectives: objectives,
+    dailyProgress: emptyDailyProgress(objectives),
+  };
 }
 
 /** Exported for tests — force-create a tile (bypasses specials). */

@@ -50,8 +50,11 @@ function buildPotentialGraph(
 
       const dr = Math.abs(tile.row - other.row);
       const dc = Math.abs(tile.col - other.col);
-      const ortho = (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
-      if (!ortho) continue;
+      const adjacent =
+        (dr === 1 && dc === 0) ||
+        (dr === 0 && dc === 1) ||
+        (dr === 1 && dc === 1 && (tile.bridge || other.bridge));
+      if (!adjacent) continue;
       if (!canMatch(tile, other)) continue;
 
       if (alreadyConnected(tile, other)) {

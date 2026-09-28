@@ -2,6 +2,7 @@ export type SymbolId = "circle" | "triangle" | "square" | "diamond";
 export type ColorId = "coral" | "teal" | "indigo" | "amber";
 export type TileId = string;
 export type GameMode = "endless" | "daily";
+export type DifficultyLevel = "easy" | "medium" | "hard";
 
 export interface Tile {
   id: TileId;
@@ -11,7 +12,27 @@ export interface Tile {
   color: ColorId;
   locked: boolean;
   wild: boolean;
+  /** Allows diagonal links when either endpoint is a bridge. */
+  bridge: boolean;
   connections: TileId[];
+}
+
+/** Seeded bonus goals for the daily puzzle. */
+export interface DailyObjectives {
+  /** Clear at least one loop of this size (or larger). */
+  minLoopSize: number;
+  /** Include at most this many wild tiles across all clears. */
+  maxWildUses: number;
+  /** Reach this score before (or when) solving. */
+  targetScore: number;
+}
+
+export interface DailyProgress {
+  bestLoopSize: number;
+  wildsUsed: number;
+  loopGoalMet: boolean;
+  wildGoalMet: boolean;
+  scoreGoalMet: boolean;
 }
 
 export interface ConnectionEdge {
@@ -56,6 +77,13 @@ export interface GameState {
   lastClearSize: number | null;
   lastScoreGain: number | null;
   lastClearedIds: TileId[];
+  /** Positions of last cleared tiles (for FX after board removal). */
+  lastClearPositions: Array<{
+    id: TileId;
+    row: number;
+    col: number;
+    color: ColorId;
+  }>;
   moveCount: number;
   dailyMoveLimit: number;
   dailySolved: boolean;
@@ -64,6 +92,11 @@ export interface GameState {
   seed: number;
   rngState: number;
   message: string | null;
+  /** Endless difficulty preset; null for daily. */
+  difficultyLevel: DifficultyLevel | null;
+  /** Present in daily mode. */
+  dailyObjectives: DailyObjectives | null;
+  dailyProgress: DailyProgress | null;
 }
 
 export type GameAction =
@@ -95,4 +128,21 @@ export interface DailyResult {
   solved: boolean;
   moves: number;
   limit: number;
+  score?: number;
+  objectivesMet?: number;
+  objectivesTotal?: number;
+}
+
+export interface DailyStreak {
+  current: number;
+  best: number;
+  lastSolvedDate: string | null;
+  /** YYYY-MM-DD keys solved (kept trimmed). */
+  solvedDates: string[];
+}
+
+export interface TeachFlags {
+  seenWild: boolean;
+  seenLock: boolean;
+  seenBridge: boolean;
 }

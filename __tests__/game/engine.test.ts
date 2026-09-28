@@ -10,6 +10,8 @@ import { validateConnection, listLegalConnections } from "@/game/connections";
 import { MAX_CONNECTIONS, MIN_LOOP_SIZE } from "@/game/config";
 import { findCycleClosedByEdge } from "@/game/loops";
 import { baseScoreForLoop, scoreLoop } from "@/game/scoring";
+import { nextDifficultyStage } from "@/game/difficulty";
+import { LEVEL_PRESETS } from "@/game/config";
 import {
   createInitialState,
   newDailyGame,
@@ -30,6 +32,7 @@ function tile(
   return {
     locked: false,
     wild: false,
+    bridge: false,
     connections: [],
     ...partial,
   };
@@ -322,10 +325,15 @@ describe("reduce connect + clear", () => {
     expect(state.stats.loopsCreated).toBe(1);
     expect(state.score).toBe(60);
     expect(state.lastClearSize).toBe(4);
+    // Loop is final — no undo trail past a clear
+    expect(state.history.length).toBe(0);
+    const afterUndo = reduce(state, { type: "UNDO" });
+    expect(afterUndo.score).toBe(60);
+    expect(afterUndo.stats.loopsCreated).toBe(1);
   });
 
   it("never exceeds max connections", () => {
-    const state = newEndlessGame(99);
+    const state = newEndlessGame("medium", 99);
     for (const row of state.board) {
       for (const t of row) {
         if (t) expect(t.connections.length).toBeLessThanOrEqual(MAX_CONNECTIONS);
@@ -362,6 +370,39 @@ describe("daily sparse puzzle", () => {
     expect(state.dailyMoveLimit).toBeLessThanOrEqual(14);
     expect(state.dailyMoveLimit).toBeGreaterThanOrEqual(12);
     expect(listLegalConnections(state).length).toBeGreaterThan(0);
+  });
+});
+
+describe("always a route", () => {
+  it("new boards always have a clearable 2x2", async () => {
+    const { hasClearableTwoByTwo } = await import("@/game/routes");
+    for (let i = 0; i < 50; i++) {
+      const state = newEndlessGame("medium", (i * 99991) >>> 0);
+      expect(hasClearableTwoByTwo(state.board)).toBe(true);
+    }
+  });
+
+  it("repair restores a route when stuck", async () => {
+    const { ensureCompletableRoute, hasClearableTwoByTwo } = await import(
+      "@/game/routes"
+    );
+    const { createRng } = await import("@/game/rng");
+    // All locked board → plant unlocks a 2x2
+    const board = Array.from({ length: 5 }, (_, r) =>
+      Array.from({ length: 5 }, (_, c) =>
+        tile({
+          id: `L${r}-${c}`,
+          row: r,
+          col: c,
+          symbol: "circle",
+          color: "coral",
+          locked: true,
+        }),
+      ),
+    );
+    expect(hasClearableTwoByTwo(board)).toBe(false);
+    const fixed = ensureCompletableRoute(board, createRng(1), 0);
+    expect(hasClearableTwoByTwo(fixed)).toBe(true);
   });
 });
 
@@ -409,5 +450,131 @@ describe("full loop hints", () => {
     expect(hint!.tileIds.length).toBeGreaterThanOrEqual(4);
     expect(hint!.edges.length).toBe(hint!.tileIds.length);
     expect(hint!.potentialScore).toBeGreaterThan(0);
+  });
+});
+
+describe("bridge diagonals", () => {
+  it("allows diagonal connection when either tile is a bridge", () => {
+    const a = tile({
+      id: "a",
+      row: 0,
+      col: 0,
+      symbol: "circle",
+      color: "coral",
+      bridge: true,
+    });
+    const b = tile({
+      id: "b",
+      row: 1,
+      col: 1,
+      symbol: "circle",
+      color: "teal",
+    });
+    const board = Array.from({ length: 5 }, () =>
+      Array.from({ length: 5 }, () => null),
+    ) as (Tile | null)[][];
+    board[0]![0] = a;
+    board[1]![1] = b;
+    const state = stateFromBoard(board);
+    const v = validateConnection(state, "a", "b");
+    expect(v.ok).toBe(true);
+  });
+
+  it("rejects diagonal without a bridge", () => {
+    const a = tile({
+      id: "a",
+      row: 0,
+      col: 0,
+      symbol: "circle",
+      color: "coral",
+    });
+    const b = tile({
+      id: "b",
+      row: 1,
+      col: 1,
+      symbol: "circle",
+      color: "teal",
+    });
+    const board = Array.from({ length: 5 }, () =>
+      Array.from({ length: 5 }, () => null),
+    ) as (Tile | null)[][];
+    board[0]![0] = a;
+    board[1]![1] = b;
+    const state = stateFromBoard(board);
+    expect(validateConnection(state, "a", "b").ok).toBe(false);
+  });
+});
+
+describe("fever scoring and undos", () => {
+  it("applies fever multiplier at high combo", () => {
+    const base = scoreLoop(4, 1);
+    const fever = scoreLoop(4, 5);
+    expect(fever).toBeGreaterThan(base * 5);
+  });
+
+  it("spends an undo charge on UNDO but not REVERT", () => {
+    const a = tile({
+      id: "a",
+      row: 0,
+      col: 0,
+      symbol: "circle",
+      color: "coral",
+    });
+    const b = tile({
+      id: "b",
+      row: 0,
+      col: 1,
+      symbol: "circle",
+      color: "teal",
+    });
+    const board = Array.from({ length: 5 }, () =>
+      Array.from({ length: 5 }, () => null),
+    ) as (Tile | null)[][];
+    board[0]![0] = a;
+    board[0]![1] = b;
+    let state = stateFromBoard(board);
+    state = { ...state, undosLeft: 2 };
+    state = reduce(state, { type: "CONNECT", fromId: "a", toId: "b" });
+    expect(state.history.length).toBe(1);
+    const afterRevert = reduce(state, { type: "REVERT" });
+    expect(afterRevert.undosLeft).toBe(2);
+    // reconnect then UNDO
+    state = reduce(afterRevert, { type: "CONNECT", fromId: "a", toId: "b" });
+    const afterUndo = reduce(state, { type: "UNDO" });
+    expect(afterUndo.undosLeft).toBe(1);
+  });
+
+  it("daily game includes seeded objectives", () => {
+    const daily = newDailyGame("2026-09-25");
+    expect(daily.dailyObjectives).not.toBeNull();
+    expect(daily.dailyProgress).not.toBeNull();
+    expect(daily.dailyObjectives!.minLoopSize).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("difficulty levels", () => {
+  it("easy starts at stage 0 and never exceeds max stage 1", () => {
+    const state = newEndlessGame("easy", 42);
+    expect(state.difficultyLevel).toBe("easy");
+    expect(state.difficultyStage).toBe(LEVEL_PRESETS.easy.startStage);
+    expect(nextDifficultyStage(0, "easy")).toBe(0);
+    expect(nextDifficultyStage(4, "easy")).toBe(1);
+    expect(nextDifficultyStage(40, "easy")).toBe(LEVEL_PRESETS.easy.maxStage);
+  });
+
+  it("hard starts at stage 3 and caps at 4", () => {
+    const state = newEndlessGame("hard", 7);
+    expect(state.difficultyStage).toBe(LEVEL_PRESETS.hard.startStage);
+    expect(nextDifficultyStage(0, "hard")).toBe(3);
+    expect(nextDifficultyStage(4, "hard")).toBe(4);
+    expect(nextDifficultyStage(99, "hard")).toBe(LEVEL_PRESETS.hard.maxStage);
+  });
+
+  it("medium sits between easy and hard start stages", () => {
+    const easy = newEndlessGame("easy", 1);
+    const medium = newEndlessGame("medium", 1);
+    const hard = newEndlessGame("hard", 1);
+    expect(easy.difficultyStage).toBeLessThan(medium.difficultyStage);
+    expect(medium.difficultyStage).toBeLessThanOrEqual(hard.difficultyStage);
   });
 });

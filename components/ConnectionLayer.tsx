@@ -9,10 +9,10 @@ interface ConnectionLayerProps {
   board: (TileModel | null)[][];
   clearingIds: string[];
   hintEdges?: Array<{ a: string; b: string }>;
-  /** Ordered tile ids for the active continuous path. */
   pathIds?: string[];
   drawing?: boolean;
   cursor?: { x: number; y: number } | null;
+  guidePath?: string[];
 }
 
 function edgeKey(a: string, b: string): string {
@@ -26,6 +26,7 @@ export function ConnectionLayer({
   pathIds = [],
   drawing = false,
   cursor = null,
+  guidePath = [],
 }: ConnectionLayerProps) {
   const edges = useMemo(() => {
     const seen = new Set<string>();
@@ -68,9 +69,33 @@ export function ConnectionLayer({
   const pathD =
     pathPoints.length > 0
       ? pathPoints
-          .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+          .map(
+            (p, i) =>
+              `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`,
+          )
           .join(" ")
       : "";
+
+  const guidePoints = guidePath
+    .map((id) => findTile(board, id))
+    .filter((t): t is TileModel => !!t)
+    .map((t) => ({
+      x: (t.col + 0.5) * cell,
+      y: (t.row + 0.5) * cell,
+    }));
+
+  const guideD =
+    guidePoints.length > 0
+      ? guidePoints
+          .map(
+            (p, i) =>
+              `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`,
+          )
+          .join(" ")
+      : "";
+
+  const guideTip =
+    guidePoints.length > 0 ? guidePoints[guidePoints.length - 1]! : null;
 
   return (
     <svg
@@ -105,8 +130,7 @@ export function ConnectionLayer({
         const x2 = (b.col + 0.5) * cell;
         const y2 = (b.row + 0.5) * cell;
         const glow = clearing.has(a.id) && clearing.has(b.id);
-        const onPath =
-          pathIds.includes(a.id) && pathIds.includes(b.id);
+        const onPath = pathIds.includes(a.id) && pathIds.includes(b.id);
         return (
           <line
             key={key}
@@ -120,9 +144,10 @@ export function ConnectionLayer({
             strokeLinecap="round"
             className="animate-[drawLine_180ms_ease-out]"
             style={{
-              filter: glow || onPath
-                ? "drop-shadow(0 0 2px rgba(42,157,143,0.55))"
-                : undefined,
+              filter:
+                glow || onPath
+                  ? "drop-shadow(0 0 2px rgba(42,157,143,0.55))"
+                  : undefined,
             }}
           />
         );
@@ -137,6 +162,28 @@ export function ConnectionLayer({
           strokeLinecap="round"
           strokeLinejoin="round"
           className="animate-[pathPulse_1.2s_ease-in-out_infinite]"
+        />
+      )}
+      {guideD && (
+        <path
+          d={guideD}
+          fill="none"
+          stroke="#E9A319"
+          strokeOpacity={0.9}
+          strokeWidth={2.4}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="animate-[drawLine_320ms_ease-out]"
+          style={{ filter: "drop-shadow(0 0 3px rgba(233,163,25,0.7))" }}
+        />
+      )}
+      {guideTip && (
+        <circle
+          cx={guideTip.x}
+          cy={guideTip.y}
+          r={2.8}
+          fill="#E9A319"
+          className="animate-[guideDot_600ms_ease-in-out_infinite]"
         />
       )}
     </svg>

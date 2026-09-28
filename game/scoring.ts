@@ -1,4 +1,8 @@
-import { SCORING } from "@/game/config";
+import {
+  FEVER_COMBO_THRESHOLD,
+  FEVER_SCORE_MULT,
+  SCORING,
+} from "@/game/config";
 
 export function baseScoreForLoop(size: number): number {
   if (SCORING.baseBySize[size] !== undefined) {
@@ -19,8 +23,13 @@ export function baseScoreForLoop(size: number): number {
   return Math.max(30, size * 15);
 }
 
+export function isFeverCombo(combo: number): boolean {
+  return combo >= FEVER_COMBO_THRESHOLD;
+}
+
 export function scoreLoop(size: number, combo: number): number {
   const base = baseScoreForLoop(size);
   const mult = Math.max(1, combo);
-  return base * mult;
+  const fever = isFeverCombo(combo) ? FEVER_SCORE_MULT : 1;
+  return Math.round(base * mult * fever);
 }

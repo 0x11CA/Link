@@ -39,6 +39,8 @@ export type Sfx =
   | "connect"
   | "loop"
   | "combo"
+  | "fever"
+  | "comboBreak"
   | "gameover"
   | "reject";
 
@@ -59,6 +61,16 @@ export function playSfx(kind: Sfx, enabled: boolean): void {
     case "combo":
       tone(880, 0.1, "square", 0.04);
       setTimeout(() => tone(1175, 0.12, "square", 0.04), 80);
+      break;
+    case "fever":
+      tone(523, 0.06, "sine", 0.06);
+      setTimeout(() => tone(659, 0.06, "sine", 0.06), 50);
+      setTimeout(() => tone(784, 0.06, "sine", 0.07), 100);
+      setTimeout(() => tone(1047, 0.14, "triangle", 0.08), 160);
+      break;
+    case "comboBreak":
+      tone(240, 0.1, "sawtooth", 0.035);
+      setTimeout(() => tone(180, 0.14, "triangle", 0.03), 90);
       break;
     case "gameover":
       tone(300, 0.15, "sawtooth", 0.05);

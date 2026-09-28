@@ -34,25 +34,41 @@ export const SCORING = {
 
 /** Clears required before advancing difficulty stage. */
 export const DIFFICULTY_STAGES = [
-  { symbols: 2, colors: 2, lockRate: 0, wildRate: 0 },
-  { symbols: 2, colors: 3, lockRate: 0.02, wildRate: 0.01 },
-  { symbols: 3, colors: 3, lockRate: 0.04, wildRate: 0.015 },
-  { symbols: 3, colors: 4, lockRate: 0.06, wildRate: 0.02 },
-  { symbols: 4, colors: 4, lockRate: 0.08, wildRate: 0.025 },
+  { symbols: 2, colors: 2, lockRate: 0, wildRate: 0, bridgeRate: 0 },
+  { symbols: 2, colors: 3, lockRate: 0.02, wildRate: 0.01, bridgeRate: 0.015 },
+  { symbols: 3, colors: 3, lockRate: 0.04, wildRate: 0.015, bridgeRate: 0.02 },
+  { symbols: 3, colors: 4, lockRate: 0.06, wildRate: 0.02, bridgeRate: 0.025 },
+  { symbols: 4, colors: 4, lockRate: 0.08, wildRate: 0.025, bridgeRate: 0.03 },
 ] as const;
 
 export const CLEARS_PER_STAGE = 4;
 
-export const STARTING_UNDOS = 99;
-/** @deprecated Undo is unlimited; kept for save compatibility. */
+/** Endless Easy / Medium / Hard presets (index into DIFFICULTY_STAGES). */
+export const LEVEL_PRESETS = {
+  easy: { startStage: 0, maxStage: 1, label: "Easy" },
+  medium: { startStage: 1, maxStage: 3, label: "Medium" },
+  hard: { startStage: 3, maxStage: 4, label: "Hard" },
+} as const;
+
+/** Starting undo charges (path cancel / REVERT stays free). */
+export const STARTING_UNDOS = 3;
+/** Earn an undo charge when clearing a loop of this size or larger. */
 export const UNDO_EARN_LOOP_SIZE = 6;
-export const MAX_UNDOS = 99;
+export const MAX_UNDOS = 5;
+
+/** Combo level that triggers fever visuals and a score boost. */
+export const FEVER_COMBO_THRESHOLD = 5;
+/** Extra score multiplier while in fever (applied on top of combo). */
+export const FEVER_SCORE_MULT = 1.25;
 
 /** Free hints available at the start of each game. */
 export const STARTING_HINTS = 5;
-
-/** Points deducted for the 1st…5th hint used in a game. */
-export const HINT_PENALTIES = [25, 50, 80, 120, 180] as const;
+/** Cap on stored hints (including earned free ones). */
+export const MAX_HINTS = 5;
+/** Earn 1 free hint every N successful loop clears. */
+export const FREE_HINT_EVERY_CLEARS = 5;
+/** After this many connections with no clear, gently offer help once. */
+export const FAILED_TRIES_BEFORE_HELP = 8;
 
 export const DAILY_MOVE_LIMIT = 13;
 export const BOARD_GEN_MAX_ATTEMPTS = 80;

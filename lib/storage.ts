@@ -1,10 +1,20 @@
-import type { PersistedStats, Settings, DailyResult, GameState } from "@/types/game";
+import type {
+  PersistedStats,
+  Settings,
+  DailyResult,
+  DailyStreak,
+  TeachFlags,
+  GameState,
+  Tile,
+} from "@/types/game";
 
 const STATS_KEY = "link:stats";
 const SETTINGS_KEY = "link:settings";
 const TUTORIAL_KEY = "link:tutorialDone";
 const DAILY_KEY = "link:daily";
 const SESSION_KEY = "link:session";
+const STREAK_KEY = "link:dailyStreak";
+const TEACH_KEY = "link:teach";
 
 export const defaultStats = (): PersistedStats => ({
   gamesPlayed: 0,
@@ -19,6 +29,19 @@ export const defaultStats = (): PersistedStats => ({
 export const defaultSettings = (): Settings => ({
   sound: true,
   haptics: true,
+});
+
+export const defaultStreak = (): DailyStreak => ({
+  current: 0,
+  best: 0,
+  lastSolvedDate: null,
+  solvedDates: [],
+});
+
+export const defaultTeach = (): TeachFlags => ({
+  seenWild: false,
+  seenLock: false,
+  seenBridge: false,
 });
 
 function read<T>(key: string, fallback: T): T {
@@ -84,6 +107,63 @@ export function saveDailyResult(result: DailyResult): void {
   write(DAILY_KEY, all);
 }
 
+export function loadDailyStreak(): DailyStreak {
+  const raw = read(STREAK_KEY, defaultStreak());
+  return {
+    ...defaultStreak(),
+    ...raw,
+    solvedDates: Array.isArray(raw.solvedDates) ? raw.solvedDates : [],
+  };
+}
+
+function dayBefore(dateStr: string): string {
+  const d = new Date(dateStr + "T12:00:00");
+  d.setDate(d.getDate() - 1);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Record a solved daily and update streak. Idempotent per date. */
+export function recordDailySolved(dateStr: string): DailyStreak {
+  const streak = loadDailyStreak();
+  if (streak.solvedDates.includes(dateStr)) return streak;
+
+  const solvedDates = [...streak.solvedDates, dateStr].slice(-60);
+  let current = 1;
+  if (streak.lastSolvedDate === dayBefore(dateStr)) {
+    current = streak.current + 1;
+  } else if (streak.lastSolvedDate === dateStr) {
+    current = streak.current;
+  }
+
+  const next: DailyStreak = {
+    current,
+    best: Math.max(streak.best, current),
+    lastSolvedDate: dateStr,
+    solvedDates,
+  };
+  write(STREAK_KEY, next);
+  return next;
+}
+
+export function loadTeachFlags(): TeachFlags {
+  return read(TEACH_KEY, defaultTeach());
+}
+
+export function saveTeachFlags(flags: TeachFlags): void {
+  write(TEACH_KEY, flags);
+}
+
+function migrateTile(t: Tile): Tile {
+  return {
+    ...t,
+    bridge: t.bridge ?? false,
+    connections: [...(t.connections ?? [])],
+  };
+}
+
 export function saveSession(state: GameState): void {
   if (typeof window === "undefined") return;
   if (state.mode !== "endless") return;
@@ -103,6 +183,18 @@ export function loadSession(): GameState | null {
     if (!parsed?.board || parsed.mode !== "endless" || parsed.gameOver) {
       return null;
     }
+    parsed.board = parsed.board.map((row) =>
+      row.map((cell) => (cell ? migrateTile(cell) : null)),
+    );
+    if (parsed.dailyObjectives === undefined) parsed.dailyObjectives = null;
+    if (parsed.dailyProgress === undefined) parsed.dailyProgress = null;
+    if (parsed.difficultyLevel === undefined) {
+      parsed.difficultyLevel = parsed.mode === "endless" ? "medium" : null;
+    }
+    if (!Array.isArray(parsed.lastClearPositions)) {
+      parsed.lastClearPositions = [];
+    }
+    if (typeof parsed.undosLeft !== "number") parsed.undosLeft = 3;
     return parsed;
   } catch {
     return null;

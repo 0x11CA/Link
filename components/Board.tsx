@@ -2,8 +2,10 @@
 
 import { useCallback, useRef, useState } from "react";
 import { ConnectionLayer } from "@/components/ConnectionLayer";
+import { ClearFx } from "@/components/ClearFx";
 import { Tile } from "@/components/Tile";
 import { GRID_SIZE } from "@/game/config";
+import { isFeverCombo } from "@/game/scoring";
 import type { GameState } from "@/types/game";
 
 interface BoardProps {
@@ -16,6 +18,9 @@ interface BoardProps {
   onPathEnd: () => void;
   highlightIds?: string[];
   hintEdges?: Array<{ a: string; b: string }>;
+  /** Animated solution guide — ordered tile ids revealed so far. */
+  guidePath?: string[];
+  guideActive?: boolean;
 }
 
 export function Board({
@@ -28,6 +33,8 @@ export function Board({
   onPathEnd,
   highlightIds = [],
   hintEdges = [],
+  guidePath = [],
+  guideActive = false,
 }: BoardProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -54,13 +61,13 @@ export function Board({
 
   const startStroke = useCallback(
     (tileId: string, e: React.PointerEvent) => {
-      if (state.gameOver || state.dailySolved) return;
+      if (state.gameOver || state.dailySolved || guideActive) return;
       drawingRef.current = true;
       rootRef.current?.setPointerCapture(e.pointerId);
       onPathStart(tileId);
       setCursor(toSvgCursor(e.clientX, e.clientY));
     },
-    [state.gameOver, state.dailySolved, onPathStart, toSvgCursor],
+    [state.gameOver, state.dailySolved, guideActive, onPathStart, toSvgCursor],
   );
 
   const onPointerMove = useCallback(
@@ -88,6 +95,8 @@ export function Board({
 
   const clearing = state.lastClearedIds;
   const head = pathIds[pathIds.length - 1] ?? null;
+  const guideHead =
+    guidePath.length > 0 ? guidePath[guidePath.length - 1]! : null;
 
   return (
     <div
@@ -99,9 +108,13 @@ export function Board({
     >
       <div
         ref={gridRef}
-        className="relative grid gap-2 rounded-[1.5rem] bg-[#ECEAE6]/70 p-2.5 shadow-inner"
+        className={[
+          "relative grid gap-0 overflow-hidden rounded-[1.25rem] p-1.5 shadow-inner",
+          isFeverCombo(state.combo) ? "animate-[feverPulse_1.4s_ease-in-out_infinite]" : "",
+        ].join(" ")}
         style={{
           gridTemplateColumns: `repeat(${GRID_SIZE}, minmax(0, 1fr))`,
+          background: "#C4B8A8",
         }}
       >
         <ConnectionLayer
@@ -111,14 +124,18 @@ export function Board({
           pathIds={pathIds}
           drawing={drawing}
           cursor={cursor}
+          guidePath={guidePath}
         />
         {state.board.map((row, r) =>
           row.map((cell, c) => {
+            const isLight = (r + c) % 2 === 0;
+            const squareBg = isLight ? "#EDE6DC" : "#B7A894";
             if (!cell) {
               return (
                 <div
                   key={`empty-${r}-${c}`}
-                  className="aspect-square rounded-2xl bg-transparent"
+                  className="aspect-square p-1"
+                  style={{ background: squareBg }}
                 />
               );
             }
@@ -126,7 +143,8 @@ export function Board({
               <div
                 key={cell.id}
                 data-tile-id={cell.id}
-                className="min-h-0"
+                className="relative aspect-square min-h-0 p-1"
+                style={{ background: squareBg }}
                 onPointerDown={(e) => {
                   e.preventDefault();
                   startStroke(cell.id, e);
@@ -137,21 +155,34 @@ export function Board({
                   selected={false}
                   inPath={pathIds.includes(cell.id)}
                   pathHead={head === cell.id}
-                  highlighted={highlightIds.includes(cell.id)}
+                  highlighted={
+                    highlightIds.includes(cell.id) ||
+                    guidePath.includes(cell.id)
+                  }
                   clearing={clearing.includes(cell.id)}
                   rejectShake={rejectId === cell.id}
+                  guidePulse={guideHead === cell.id}
                 />
               </div>
             );
           }),
         )}
+        <ClearFx
+          positions={state.lastClearPositions ?? []}
+          scoreGain={state.lastScoreGain}
+          clearsCount={state.clearsCount}
+        />
       </div>
+
       {state.lastScoreGain ? (
         <div
           key={`${state.clearsCount}-${state.lastScoreGain}`}
-          className="pointer-events-none absolute left-1/2 top-1/3 z-20 -translate-x-1/2 animate-[floatScore_700ms_ease-out_forwards] text-2xl font-semibold text-[#2A9D8F]"
+          className="pointer-events-none absolute left-1/2 top-1/3 z-20 -translate-x-1/2 animate-[popScore_900ms_ease-out_forwards] text-2xl font-semibold text-[#2A9D8F]"
         >
           +{state.lastScoreGain}
+          {isFeverCombo(Math.max(1, state.combo - 1)) ? (
+            <span className="ml-1 text-sm text-[#E9A319]">fever</span>
+          ) : null}
         </div>
       ) : null}
     </div>

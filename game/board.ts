@@ -68,8 +68,10 @@ export function createTile(
 
   let wild = false;
   let locked = false;
+  let bridge = false;
   if (!options?.forceNormal) {
-    if (chance(rng, cfg.wildRate)) wild = true;
+    if (chance(rng, cfg.bridgeRate)) bridge = true;
+    else if (chance(rng, cfg.wildRate)) wild = true;
     else if (chance(rng, cfg.lockRate)) locked = true;
   }
 
@@ -81,6 +83,7 @@ export function createTile(
     color: pick(rng, colors),
     locked,
     wild,
+    bridge,
     connections: [],
   };
 }
@@ -144,11 +147,43 @@ export function areOrthogonalNeighbors(a: Tile, b: Tile): boolean {
   return (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
 }
 
+/** Orthogonal always; diagonal only if either tile is a bridge. */
+export function areNeighbors(a: Tile, b: Tile): boolean {
+  const dr = Math.abs(a.row - b.row);
+  const dc = Math.abs(a.col - b.col);
+  if ((dr === 1 && dc === 0) || (dr === 0 && dc === 1)) return true;
+  if (dr === 1 && dc === 1 && (a.bridge || b.bridge)) return true;
+  return false;
+}
+
 export function neighborsOf(board: (Tile | null)[][], tile: Tile): Tile[] {
   const result: Tile[] = [];
   for (const [dr, dc] of ADJACENCY_OFFSETS) {
     const n = tileAt(board, tile.row + dr, tile.col + dc);
     if (n) result.push(n);
+  }
+  // Diagonal neighbors when this tile is a bridge
+  if (tile.bridge) {
+    for (const [dr, dc] of [
+      [-1, -1],
+      [-1, 1],
+      [1, -1],
+      [1, 1],
+    ] as const) {
+      const n = tileAt(board, tile.row + dr, tile.col + dc);
+      if (n) result.push(n);
+    }
+  } else {
+    // Non-bridge can still link diagonally TO a bridge
+    for (const [dr, dc] of [
+      [-1, -1],
+      [-1, 1],
+      [1, -1],
+      [1, 1],
+    ] as const) {
+      const n = tileAt(board, tile.row + dr, tile.col + dc);
+      if (n?.bridge) result.push(n);
+    }
   }
   return result;
 }
@@ -201,9 +236,10 @@ export function generatePlayableBoard(
 
   while (attempt < BOARD_GEN_MAX_ATTEMPTS) {
     const rng = createRng(localSeed);
-    const board = fillBoard(rng, stage, !options?.allowSpecials);
-    if (boardLooksPlayable(board)) {
-      // Drain one more call so callers can continue from a derived state.
+    let board = fillBoard(rng, stage, !options?.allowSpecials);
+    // Always guarantee a completable loop route
+    board = ensureRouteInline(board, rng, stage);
+    if (boardLooksPlayable(board) || hasInlineTwoByTwo(board)) {
       const leftover = Math.floor(rng() * 1e9);
       return { board, rngState: leftover ^ localSeed };
     }
@@ -211,10 +247,101 @@ export function generatePlayableBoard(
     localSeed = (localSeed + 0x9e3779b9 + attempt) >>> 0;
   }
 
-  // Fallback: forced diverse board
   const rng = createRng(seed);
-  const board = fillBoard(rng, stage, true);
+  let board = fillBoard(rng, stage, true);
+  board = ensureRouteInline(board, rng, stage);
   return { board, rngState: (seed ^ 0xabcdef) >>> 0 };
+}
+
+function hasInlineTwoByTwo(board: (Tile | null)[][]): boolean {
+  for (let r = 0; r < GRID_SIZE - 1; r++) {
+    for (let c = 0; c < GRID_SIZE - 1; c++) {
+      const tl = tileAt(board, r, c);
+      const tr = tileAt(board, r, c + 1);
+      const br = tileAt(board, r + 1, c + 1);
+      const bl = tileAt(board, r + 1, c);
+      if (!tl || !tr || !br || !bl) continue;
+      if (tl.locked || tr.locked || br.locked || bl.locked) continue;
+      if (
+        canMatch(tl, tr) &&
+        canMatch(tr, br) &&
+        canMatch(br, bl) &&
+        canMatch(bl, tl)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function ensureRouteInline(
+  board: (Tile | null)[][],
+  rng: () => number,
+  stage: number,
+): (Tile | null)[][] {
+  if (hasInlineTwoByTwo(board)) return board;
+  // Deferred import avoided — plant directly here
+  return plantLoopOnBoard(board, rng, stage);
+}
+
+function plantLoopOnBoard(
+  board: (Tile | null)[][],
+  rng: () => number,
+  stage: number,
+): (Tile | null)[][] {
+  const next = cloneBoard(board);
+  const symbols = symbolPool(stage);
+  const colors = colorPool(stage);
+  const r = Math.floor(rng() * (GRID_SIZE - 1));
+  const c = Math.floor(rng() * (GRID_SIZE - 1));
+  const sA = pick(rng, symbols);
+  let sB = pick(rng, symbols);
+  if (sB === sA && symbols.length > 1) sB = symbols.find((s) => s !== sA) ?? sB;
+  const cA = pick(rng, colors);
+  let cB = pick(rng, colors);
+  if (cB === cA && colors.length > 1) cB = colors.find((x) => x !== cA) ?? cB;
+
+  const cells = [
+    { r, c, symbol: sA, color: cA },
+    { r, c: c + 1, symbol: sA, color: cB },
+    { r: r + 1, c: c + 1, symbol: sB, color: cB },
+    { r: r + 1, c, symbol: sB, color: cA },
+  ];
+  const ids = new Set<string>();
+  for (const cell of cells) {
+    const t = next[cell.r]![cell.c];
+    if (t) ids.add(t.id);
+  }
+  for (const row of next) {
+    for (const t of row) {
+      if (!t) continue;
+      if (ids.has(t.id)) t.connections = [];
+      else t.connections = t.connections.filter((id) => !ids.has(id));
+    }
+  }
+  for (const cell of cells) {
+    const existing = next[cell.r]![cell.c];
+    if (existing) {
+      existing.symbol = cell.symbol as SymbolId;
+      existing.color = cell.color as ColorId;
+      existing.locked = false;
+      existing.wild = false;
+      existing.bridge = false;
+      existing.connections = [];
+    } else {
+      next[cell.r]![cell.c] = createTile(cell.r, cell.c, rng, stage, {
+        forceNormal: true,
+      });
+      const t = next[cell.r]![cell.c]!;
+      t.symbol = cell.symbol as SymbolId;
+      t.color = cell.color as ColorId;
+      t.locked = false;
+      t.wild = false;
+      t.bridge = false;
+    }
+  }
+  return next;
 }
 
 export function applyGravityAndRefill(
@@ -247,7 +374,8 @@ export function applyGravityAndRefill(
     }
   }
 
-  return next;
+  // Always leave at least one completable loop route
+  return ensureRouteInline(next, rng, stage);
 }
 
 export function unlockAdjacentToCleared(

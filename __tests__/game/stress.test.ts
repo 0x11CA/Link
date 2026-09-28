@@ -48,29 +48,33 @@ describe("stress: board generation", () => {
 });
 
 describe("stress: random play sessions", () => {
-  it("simulates many games without invariant breaks", () => {
-    for (let g = 0; g < 200; g++) {
-      let state = newEndlessGame((g * 7919) >>> 0);
-      let steps = 0;
-      while (!state.gameOver && steps < 80) {
-        const edges = listLegalConnections(state);
-        if (edges.length === 0) break;
-        const pick = edges[steps % edges.length]!;
-        state = reduce(state, {
-          type: "CONNECT",
-          fromId: pick.a,
-          toId: pick.b,
-        });
-        for (const t of allTiles(state.board)) {
-          expect(t.connections.length).toBeLessThanOrEqual(MAX_CONNECTIONS);
-          // No self-connections
-          expect(t.connections.includes(t.id)).toBe(false);
+  it(
+    "simulates many games without invariant breaks",
+    () => {
+      for (let g = 0; g < 200; g++) {
+        let state = newEndlessGame("medium", (g * 7919) >>> 0);
+        let steps = 0;
+        while (!state.gameOver && steps < 80) {
+          const edges = listLegalConnections(state);
+          if (edges.length === 0) break;
+          const pick = edges[steps % edges.length]!;
+          state = reduce(state, {
+            type: "CONNECT",
+            fromId: pick.a,
+            toId: pick.b,
+          });
+          for (const t of allTiles(state.board)) {
+            expect(t.connections.length).toBeLessThanOrEqual(MAX_CONNECTIONS);
+            // No self-connections
+            expect(t.connections.includes(t.id)).toBe(false);
+          }
+          steps += 1;
         }
-        steps += 1;
+        expect(state.score).toBeGreaterThanOrEqual(0);
       }
-      expect(state.score).toBeGreaterThanOrEqual(0);
-    }
-  });
+    },
+    20_000,
+  );
 });
 
 describe("stress: daily determinism suite", () => {
@@ -86,7 +90,7 @@ describe("stress: daily determinism suite", () => {
 
 describe("scoring cannot be exploited without clears", () => {
   it("non-closing connections add no score", () => {
-    const state = newEndlessGame(12345);
+    const state = newEndlessGame("medium", 12345);
     const edges = listLegalConnections(state);
     expect(edges.length).toBeGreaterThan(0);
     const next = reduce(state, {

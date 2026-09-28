@@ -98,6 +98,7 @@ export function generateDailyBoard(dateStr: string): {
       color: color ?? pick(rng, colors),
       locked: false,
       wild: false,
+      bridge: false,
       connections: [],
     };
   }
@@ -109,6 +110,17 @@ export function generateDailyBoard(dateStr: string): {
     const idx = Math.floor(rng() * candidates.length);
     const t = candidates.splice(idx, 1)[0]!;
     t.locked = true;
+  }
+
+  // Occasional wild / bridge for objective spice (unlocked tiles only)
+  const free = candidates.filter((t) => !t.locked);
+  if (free.length > 0 && rng() < 0.35) {
+    const t = free[Math.floor(rng() * free.length)]!;
+    t.wild = true;
+  }
+  if (free.length > 1 && rng() < 0.4) {
+    const t = free[Math.floor(rng() * free.length)]!;
+    if (!t.wild) t.bridge = true;
   }
 
   let tileCount = 0;
@@ -189,6 +201,7 @@ function placeLoopSquare(
       color: cell.color,
       locked: false,
       wild: false,
+      bridge: false,
       connections: [],
     };
   }
@@ -200,7 +213,11 @@ export function assertDailyDeterminism(dateStr: string): boolean {
   const flat = (board: (Tile | null)[][]) =>
     board
       .flat()
-      .map((t) => (t ? `${t.symbol}:${t.color}:${t.locked ? "L" : ""}` : "x"))
+      .map((t) =>
+        t
+          ? `${t.symbol}:${t.color}:${t.locked ? "L" : ""}${t.wild ? "W" : ""}${t.bridge ? "B" : ""}`
+          : "x",
+      )
       .join("|");
   return flat(a.board) === flat(b.board) && a.seed === b.seed;
 }

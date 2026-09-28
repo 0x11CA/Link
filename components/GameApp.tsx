@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { HowToPlayVideo } from "@/components/HowToPlayVideo";
 import { Board } from "@/components/Board";
+import { ComboMeter } from "@/components/ComboMeter";
 import {
   GhostButton,
   IconButton,
@@ -16,31 +17,59 @@ import {
   newEndlessGame,
   reduce,
 } from "@/game/actions";
-import { dateKey, formatDailyShare, formatEndlessShare } from "@/game/daily";
+import {
+  dateKey,
+  formatDailyShare,
+  formatEndlessShare,
+  streakCalendarMarks,
+} from "@/game/daily";
+import { countObjectivesMet } from "@/game/dailyObjectives";
 import { suggestHint } from "@/game/hints";
-import { HINT_PENALTIES, STARTING_HINTS } from "@/game/config";
-import type { GameAction, GameState } from "@/types/game";
+import {
+  FAILED_TRIES_BEFORE_HELP,
+  FREE_HINT_EVERY_CLEARS,
+  MAX_HINTS,
+  MIN_LOOP_SIZE,
+  STARTING_HINTS,
+  DIFFICULTY_STAGES,
+  LEVEL_PRESETS,
+} from "@/game/config";
+import { isFeverCombo } from "@/game/scoring";
+import { levelDisplayName } from "@/game/difficulty";
+import type {
+  DailyStreak,
+  DifficultyLevel,
+  GameAction,
+  GameState,
+  TeachFlags,
+} from "@/types/game";
 import { playSfx } from "@/lib/audio";
 import { haptic } from "@/lib/haptics";
 import { shareText } from "@/lib/share";
 import {
   clearSession,
   isTutorialDone,
+  loadDailyStreak,
   loadSession,
   loadSettings,
   loadStats,
+  loadTeachFlags,
   recordBestScore,
+  recordDailySolved,
   saveDailyResult,
   saveSession,
   saveSettings,
   saveStats,
+  saveTeachFlags,
   setTutorialDone,
 } from "@/lib/storage";
+import { createMathChallenge } from "@/lib/mathChallenge";
 import { validateConnection } from "@/game/connections";
 import type { Settings } from "@/types/game";
 
 type View =
   | "home"
+  | "levels"
   | "play"
   | "daily"
   | "tutorial"
@@ -56,7 +85,19 @@ function gameReducer(state: GameState, action: GameAction | { type: "REPLACE"; s
 function buildTutorialState(): GameState {
   // Craft a tiny guided board with an obvious 2x2 loop in the center
   const base = createInitialState({ mode: "endless", seed: 1 });
-  const board = base.board.map((row) => row.map((t) => (t ? { ...t, connections: [] as string[], locked: false, wild: false } : null)));
+  const board = base.board.map((row) =>
+    row.map((t) =>
+      t
+        ? {
+            ...t,
+            connections: [] as string[],
+            locked: false,
+            wild: false,
+            bridge: false,
+          }
+        : null,
+    ),
+  );
   // Force a clear 2x2 matching square at bottom-left for tutorial
   const cells = [
     { r: 3, c: 0, symbol: "circle" as const, color: "coral" as const },
@@ -72,16 +113,18 @@ function buildTutorialState(): GameState {
       color: cell.color,
       locked: false,
       wild: false,
+      bridge: false,
       connections: [],
     };
   }
-  return { ...base, board, undosLeft: 1 };
+  return { ...base, board, undosLeft: 1, difficultyLevel: "easy" as const };
 }
 
 export function GameApp() {
   const [view, setView] = useState<View>("home");
+  const [selectedLevel, setSelectedLevel] = useState<DifficultyLevel>("medium");
   const [state, dispatch] = useReducer(gameReducer, undefined, () =>
-    newEndlessGame(),
+    newEndlessGame("medium"),
   );
   const [settings, setSettingsState] = useState<Settings>({
     sound: true,
@@ -99,15 +142,52 @@ export function GameApp() {
     [],
   );
   const [hintScore, setHintScore] = useState(0);
-  const [hintPenaltyFlash, setHintPenaltyFlash] = useState<number | null>(null);
   const [hintsLeft, setHintsLeft] = useState(STARTING_HINTS);
   const [pathIds, setPathIds] = useState<string[]>([]);
   const [drawing, setDrawing] = useState(false);
   const [rejectId, setRejectId] = useState<string | null>(null);
+  const [guidePath, setGuidePath] = useState<string[]>([]);
+  const [guideActive, setGuideActive] = useState(false);
+  const [guideWillComplete, setGuideWillComplete] = useState(false);
+  const [freeHintFlash, setFreeHintFlash] = useState(false);
+  const [mathOpen, setMathOpen] = useState(false);
+  const [mathChallenge, setMathChallenge] = useState<{
+    prompt: string;
+    answer: number;
+  } | null>(null);
+  const [mathInput, setMathInput] = useState("");
+  const [mathError, setMathError] = useState(false);
+  const [comboBroken, setComboBroken] = useState(false);
+  const [stageToast, setStageToast] = useState<string | null>(null);
+  const [teachToast, setTeachToast] = useState<string | null>(null);
+  const [streak, setStreak] = useState<DailyStreak>(() =>
+    typeof window !== "undefined" ? loadDailyStreak() : {
+      current: 0,
+      best: 0,
+      lastSolvedDate: null,
+      solvedDates: [],
+    },
+  );
+  const [teach, setTeach] = useState<TeachFlags>(() =>
+    typeof window !== "undefined"
+      ? loadTeachFlags()
+      : { seenWild: false, seenLock: false, seenBridge: false },
+  );
+  const pendingGuideRef = useRef<{
+    tileIds: string[];
+    edges: Array<{ a: string; b: string }>;
+    potentialScore: number;
+  } | null>(null);
+  const prevComboRef = useRef(1);
+  const prevStageRef = useRef(0);
   const pathStepsRef = useRef(0);
   const pathIdsRef = useRef<string[]>([]);
   const stateRef = useRef(state);
   const recordedGameOver = useRef(false);
+  const guideTimerRef = useRef<number | null>(null);
+  const failedTriesRef = useRef(0);
+  const helpOfferedThisStreak = useRef(false);
+  const lastClearsForFreeHint = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -116,6 +196,16 @@ export function GameApp() {
   useEffect(() => {
     pathIdsRef.current = pathIds;
   }, [pathIds]);
+
+  const bumpActivity = useCallback(() => {
+    // Reserved for activity tracking hooks
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (guideTimerRef.current) window.clearInterval(guideTimerRef.current);
+    };
+  }, []);
 
 
   useEffect(() => {
@@ -165,22 +255,130 @@ export function GameApp() {
 
   useEffect(() => {
     if (state.dailySolved && state.mode === "daily") {
+      const objectives = state.dailyObjectives;
+      const progress = state.dailyProgress;
+      let objectivesMet = 0;
+      let objectivesTotal = 3;
+      if (objectives && progress) {
+        const scored = {
+          ...progress,
+          scoreGoalMet:
+            progress.scoreGoalMet || state.score >= objectives.targetScore,
+        };
+        const c = countObjectivesMet(objectives, scored);
+        objectivesMet = c.met;
+        objectivesTotal = c.total;
+      }
       saveDailyResult({
         date: dateKey(),
         solved: true,
         moves: state.moveCount,
         limit: state.dailyMoveLimit,
+        score: state.score,
+        objectivesMet,
+        objectivesTotal,
       });
+      setStreak(recordDailySolved(dateKey()));
     }
-  }, [state.dailySolved, state.mode, state.moveCount, state.dailyMoveLimit]);
+  }, [
+    state.dailySolved,
+    state.mode,
+    state.moveCount,
+    state.dailyMoveLimit,
+    state.score,
+    state.dailyObjectives,
+    state.dailyProgress,
+  ]);
 
   useEffect(() => {
     if (state.lastClearSize) {
-      if (state.combo > 2) playSfx("combo", settings.sound);
-      else playSfx("loop", settings.sound);
+      if (isFeverCombo(Math.max(1, state.combo - 1))) {
+        playSfx("fever", settings.sound);
+      } else if (state.combo > 2) {
+        playSfx("combo", settings.sound);
+      } else {
+        playSfx("loop", settings.sound);
+      }
       haptic(settings.haptics, [10, 20, 10]);
+
+      // Successful clear — reset failed-try streak
+      failedTriesRef.current = 0;
+      helpOfferedThisStreak.current = false;
+
+      // Every 5 clears → free hint
+      const clears = state.clearsCount;
+      const prevMilestone = lastClearsForFreeHint.current;
+      if (
+        clears > 0 &&
+        clears % FREE_HINT_EVERY_CLEARS === 0 &&
+        clears !== prevMilestone
+      ) {
+        lastClearsForFreeHint.current = clears;
+        setHintsLeft((n) => Math.min(MAX_HINTS, n + 1));
+        setFreeHintFlash(true);
+        window.setTimeout(() => setFreeHintFlash(false), 1600);
+        playSfx("combo", settings.sound);
+      }
     }
   }, [state.lastClearSize, state.clearsCount]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Combo break sting when a non-clear connect drops an active combo
+  useEffect(() => {
+    if (
+      state.lastClearSize == null &&
+      state.combo === 1 &&
+      prevComboRef.current > 1 &&
+      state.moveCount > 0
+    ) {
+      setComboBroken(true);
+      playSfx("comboBreak", settings.sound);
+      haptic(settings.haptics, 20);
+      window.setTimeout(() => setComboBroken(false), 600);
+    }
+    prevComboRef.current = state.combo;
+  }, [state.combo, state.lastClearSize, state.moveCount, settings]);
+
+  // Stage-up toast
+  useEffect(() => {
+    if (state.difficultyStage > prevStageRef.current && view === "play") {
+      const cfg = DIFFICULTY_STAGES[
+        Math.min(state.difficultyStage, DIFFICULTY_STAGES.length - 1)
+      ]!;
+      const levelName = levelDisplayName(state.difficultyLevel);
+      setStageToast(
+        `${levelName} · Stage ${state.difficultyStage + 1} · ${cfg.symbols}×${cfg.colors}`,
+      );
+      window.setTimeout(() => setStageToast(null), 1800);
+    }
+    prevStageRef.current = state.difficultyStage;
+  }, [state.difficultyStage, state.difficultyLevel, view]);
+
+  // First-time specials teach moments
+  useEffect(() => {
+    if (view !== "play" && view !== "daily") return;
+    const tiles = state.board.flat().filter(Boolean);
+    setTeach((flags) => {
+      let next = flags;
+      let msg: string | null = null;
+      if (!flags.seenWild && tiles.some((t) => t!.wild)) {
+        next = { ...flags, seenWild: true };
+        msg = "★ Wild tiles match any symbol or color.";
+      } else if (!flags.seenLock && tiles.some((t) => t!.locked)) {
+        next = { ...flags, seenLock: true };
+        msg = "🔒 Locks open when you clear a loop beside them.";
+      } else if (!flags.seenBridge && tiles.some((t) => t!.bridge)) {
+        next = { ...flags, seenBridge: true };
+        msg = "↗ Bridge tiles can connect diagonally.";
+      }
+      if (msg && next !== flags) {
+        saveTeachFlags(next);
+        setTeachToast(msg);
+        window.setTimeout(() => setTeachToast(null), 3200);
+        return next;
+      }
+      return flags;
+    });
+  }, [state.board, view]);
 
   const updateSettings = (patch: Partial<Settings>) => {
     setSettingsState((prev) => {
@@ -198,10 +396,28 @@ export function GameApp() {
     setRejectId(null);
   }, []);
 
+  const beginEndless = (level: DifficultyLevel) => {
+    setSelectedLevel(level);
+    setHintIds([]);
+    setHintEdges([]);
+    setHintsLeft(STARTING_HINTS);
+    failedTriesRef.current = 0;
+    helpOfferedThisStreak.current = false;
+    lastClearsForFreeHint.current = 0;
+    clearPathUi();
+    clearSession();
+    setHasSession(false);
+    dispatch({ type: "REPLACE", state: newEndlessGame(level) });
+    setView("play");
+  };
+
   const startEndless = () => {
     setHintIds([]);
     setHintEdges([]);
     setHintsLeft(STARTING_HINTS);
+    failedTriesRef.current = 0;
+    helpOfferedThisStreak.current = false;
+    lastClearsForFreeHint.current = 0;
     clearPathUi();
     if (!isTutorialDone()) {
       dispatch({ type: "REPLACE", state: buildTutorialState() });
@@ -211,17 +427,21 @@ export function GameApp() {
     }
     const saved = loadSession();
     if (saved && !saved.gameOver && saved.score >= 0) {
+      if (saved.difficultyLevel) setSelectedLevel(saved.difficultyLevel);
       dispatch({ type: "REPLACE", state: saved });
-    } else {
-      dispatch({ type: "REPLACE", state: newEndlessGame() });
+      setView("play");
+      return;
     }
-    setView("play");
+    setView("levels");
   };
 
   const startDaily = () => {
     setHintIds([]);
     setHintEdges([]);
     setHintsLeft(STARTING_HINTS);
+    failedTriesRef.current = 0;
+    helpOfferedThisStreak.current = false;
+    lastClearsForFreeHint.current = 0;
     clearPathUi();
     dispatch({ type: "REPLACE", state: newDailyGame(dateKey()) });
     setView("daily");
@@ -249,8 +469,110 @@ export function GameApp() {
     playSfx("select", settings.sound);
   }, [clearPathUi, settings.sound]);
 
+  const applyHintLoop = useCallback(
+    (tileIds: string[]) => {
+      // Cancel any in-progress drag path first
+      const steps = pathStepsRef.current;
+      let s = stateRef.current;
+      for (let i = 0; i < steps; i++) {
+        s = reduce(s, { type: "REVERT" });
+      }
+      pathStepsRef.current = 0;
+      pathIdsRef.current = [];
+      setPathIds([]);
+      setDrawing(false);
+
+      const n = tileIds.length;
+      for (let i = 0; i < n; i++) {
+        const a = tileIds[i]!;
+        const b = tileIds[(i + 1) % n]!;
+        const v = validateConnection(s, a, b);
+        if (!v.ok) continue;
+        s = reduce(s, { type: "CONNECT", fromId: a, toId: b });
+      }
+      stateRef.current = s;
+      dispatch({ type: "REPLACE", state: s });
+      setHintIds([]);
+      setHintEdges([]);
+      setHintScore(0);
+      setGuidePath([]);
+      setGuideActive(false);
+      setGuideWillComplete(false);
+    },
+    [],
+  );
+
+  const playSolutionGuide = useCallback(
+    (
+      tileIds: string[],
+      edges: Array<{ a: string; b: string }>,
+      options?: { stopAt?: number; complete?: boolean },
+    ) => {
+      if (guideTimerRef.current) {
+        window.clearInterval(guideTimerRef.current);
+        guideTimerRef.current = null;
+      }
+      const stopAt = options?.stopAt ?? tileIds.length;
+      const shouldComplete = Boolean(options?.complete) && stopAt >= tileIds.length;
+      const shownIds = tileIds.slice(0, stopAt);
+      const shownEdges =
+        stopAt < tileIds.length
+          ? shownIds.slice(0, -1).map((a, i) => ({
+              a,
+              b: shownIds[i + 1]!,
+            }))
+          : edges;
+
+      setGuideActive(true);
+      setGuideWillComplete(shouldComplete);
+      setGuidePath([]);
+      setHintIds(shownIds);
+      setHintEdges(shownEdges);
+      let i = 0;
+      guideTimerRef.current = window.setInterval(() => {
+        i += 1;
+        setGuidePath(shownIds.slice(0, i));
+        playSfx("select", settings.sound);
+        if (i >= shownIds.length) {
+          if (guideTimerRef.current) {
+            window.clearInterval(guideTimerRef.current);
+            guideTimerRef.current = null;
+          }
+          window.setTimeout(() => {
+            if (shouldComplete) {
+              applyHintLoop(tileIds);
+              bumpActivity();
+            } else {
+              setGuideActive(false);
+              setGuideWillComplete(false);
+              setGuidePath([]);
+              setHintIds([]);
+              setHintEdges([]);
+              setHintScore(0);
+              bumpActivity();
+            }
+          }, shouldComplete ? 280 : stopAt < tileIds.length ? 500 : 700);
+        }
+      }, 260);
+    },
+    [settings.sound, bumpActivity, applyHintLoop],
+  );
+
+
+  /** Soft nudge when stuck — reveal only the first half of a route (free). */
+  const showHalfPathHint = useCallback(
+    (tileIds: string[], edges: Array<{ a: string; b: string }>) => {
+      const half = Math.max(2, Math.ceil(tileIds.length / 2));
+      setHintScore(0);
+      playSolutionGuide(tileIds, edges, { stopAt: half });
+      haptic(settings.haptics, 8);
+    },
+    [playSolutionGuide, settings.haptics],
+  );
+
   const onPathStart = useCallback(
     (tileId: string) => {
+      bumpActivity();
       const s = stateRef.current;
       if (s.gameOver || s.dailySolved) return;
       const tile = s.board.flat().find((t) => t?.id === tileId);
@@ -265,14 +587,27 @@ export function GameApp() {
       setHintIds([]);
       setHintEdges([]);
       setHintScore(0);
+      // Drop any leftover clear FX from a previous loop
+      if (stateRef.current.lastScoreGain || stateRef.current.lastClearSize) {
+        const cleared = {
+          ...stateRef.current,
+          lastClearSize: null,
+          lastScoreGain: null,
+          lastClearedIds: [],
+          lastClearPositions: [],
+        };
+        stateRef.current = cleared;
+        dispatch({ type: "REPLACE", state: cleared });
+      }
       playSfx("select", settings.sound);
       haptic(settings.haptics, 8);
     },
-    [pulseReject, settings],
+    [pulseReject, settings, bumpActivity],
   );
 
   const onPathMove = useCallback(
     (tileId: string) => {
+      bumpActivity();
       let s = stateRef.current;
       if (s.gameOver || s.dailySolved) return;
       const path = pathIdsRef.current;
@@ -293,6 +628,19 @@ export function GameApp() {
         return;
       }
 
+      const pathStart = path[0]!;
+      // Close only by returning to the path start once the loop is long enough,
+      // approaching from the other side (not mid-path shortcuts).
+      if (tileId === pathStart) {
+        if (path.length < MIN_LOOP_SIZE) {
+          pulseReject(tileId);
+          return;
+        }
+      } else if (path.includes(tileId)) {
+        pulseReject(tileId);
+        return;
+      }
+
       const v = validateConnection(s, head, tileId);
       if (!v.ok) {
         pulseReject(tileId);
@@ -308,6 +656,8 @@ export function GameApp() {
 
       if (s.lastClearSize) {
         // Loop completed — celebrate and reset path
+        failedTriesRef.current = 0;
+        helpOfferedThisStreak.current = false;
         clearPathUi();
         if (view === "tutorial") {
           setTutorialStep((step) => Math.min(step + 1, 4));
@@ -322,41 +672,104 @@ export function GameApp() {
         setTutorialStep((step) => Math.min(step + 1, 4));
       }
     },
-    [pulseReject, settings, view, clearPathUi],
+    [pulseReject, settings, view, clearPathUi, bumpActivity, guideActive],
   );
 
   const onPathEnd = useCallback(() => {
+    bumpActivity();
     setDrawing(false);
-  }, []);
+    // Don't leave a partial path on the board — only closed loops stick
+    if (pathStepsRef.current > 0) {
+      failedTriesRef.current += 1;
+      cancelPath();
+      if (
+        !helpOfferedThisStreak.current &&
+        !guideActive &&
+        view !== "tutorial" &&
+        failedTriesRef.current >= FAILED_TRIES_BEFORE_HELP
+      ) {
+        helpOfferedThisStreak.current = true;
+        const suggestion = suggestHint(stateRef.current);
+        if (suggestion) {
+          showHalfPathHint(suggestion.tileIds, suggestion.edges);
+        }
+      }
+    } else {
+      clearPathUi();
+    }
+  }, [
+    bumpActivity,
+    cancelPath,
+    clearPathUi,
+    guideActive,
+    view,
+    showHalfPathHint,
+  ]);
 
   const useHint = useCallback(() => {
-    if (hintsLeft <= 0 || state.gameOver || state.dailySolved) return;
+    bumpActivity();
+    if (state.gameOver || state.dailySolved || mathOpen || guideActive) return;
+
     const suggestion = suggestHint(stateRef.current);
     if (!suggestion) {
       playSfx("reject", settings.sound);
       return;
     }
 
-    const usedIndex = STARTING_HINTS - hintsLeft; // 0..4
-    const penalty =
-      HINT_PENALTIES[Math.min(usedIndex, HINT_PENALTIES.length - 1)] ?? 180;
+    setHintScore(suggestion.potentialScore);
 
-    let s = stateRef.current;
-    const nextScore = Math.max(0, s.score - penalty);
-    s = { ...s, score: nextScore, combo: 1 };
-    stateRef.current = s;
-    dispatch({ type: "REPLACE", state: s });
+    if (hintsLeft <= 0) {
+      // Out of hints — earn a full guide with a math puzzle (no deduction)
+      pendingGuideRef.current = {
+        tileIds: suggestion.tileIds,
+        edges: suggestion.edges,
+        potentialScore: suggestion.potentialScore,
+      };
+      setMathChallenge(createMathChallenge());
+      setMathInput("");
+      setMathError(false);
+      setMathOpen(true);
+      playSfx("select", settings.sound);
+      return;
+    }
 
     setHintsLeft((n) => n - 1);
-    setHintIds(suggestion.tileIds);
-    setHintEdges(suggestion.edges);
-    setHintScore(suggestion.potentialScore);
-    setHintPenaltyFlash(penalty);
-    window.setTimeout(() => setHintPenaltyFlash(null), 900);
-
     playSfx("select", settings.sound);
     haptic(settings.haptics, 10);
-  }, [hintsLeft, state.gameOver, state.dailySolved, settings]);
+    playSolutionGuide(suggestion.tileIds, suggestion.edges, { complete: true });
+  }, [
+    state.gameOver,
+    state.dailySolved,
+    mathOpen,
+    guideActive,
+    hintsLeft,
+    settings,
+    bumpActivity,
+    playSolutionGuide,
+  ]);
+
+  const submitMath = useCallback(() => {
+    if (!mathChallenge) return;
+    const parsed = Number.parseInt(mathInput.trim(), 10);
+    if (Number.isNaN(parsed) || parsed !== mathChallenge.answer) {
+      setMathError(true);
+      playSfx("reject", settings.sound);
+      haptic(settings.haptics, 25);
+      return;
+    }
+    setMathOpen(false);
+    setMathChallenge(null);
+    setMathInput("");
+    setMathError(false);
+    const pending = pendingGuideRef.current;
+    pendingGuideRef.current = null;
+    if (pending) {
+      setHintScore(pending.potentialScore);
+      playSolutionGuide(pending.tileIds, pending.edges, { complete: true });
+    }
+    playSfx("loop", settings.sound);
+    haptic(settings.haptics, 10);
+  }, [mathChallenge, mathInput, settings, playSolutionGuide]);
 
   const tutorialHighlights = useMemo(() => {
     if (view !== "tutorial") return [];
@@ -386,8 +799,7 @@ export function GameApp() {
     if (view === "tutorial" && tutorialStep >= 4 && state.stats.loopsCreated > 0) {
       const t = setTimeout(() => {
         setTutorialDone();
-        dispatch({ type: "REPLACE", state: newEndlessGame() });
-        setView("play");
+        setView("levels");
       }, 700);
       return () => clearTimeout(t);
     }
@@ -396,13 +808,29 @@ export function GameApp() {
   const onShare = async () => {
     const text =
       state.mode === "daily"
-        ? formatDailyShare(
-            dateKey(),
-            state.moveCount,
-            state.dailyMoveLimit,
-            state.dailySolved,
-          )
-        : formatEndlessShare(state.score, state.stats.loopsCreated);
+        ? formatDailyShare({
+            dateStr: dateKey(),
+            moves: state.moveCount,
+            limit: state.dailyMoveLimit,
+            solved: state.dailySolved,
+            score: state.score,
+            streak: streak.current,
+            objectives: state.dailyObjectives,
+            progress: state.dailyProgress
+              ? {
+                  ...state.dailyProgress,
+                  scoreGoalMet:
+                    state.dailyProgress.scoreGoalMet ||
+                    state.score >= (state.dailyObjectives?.targetScore ?? 0),
+                }
+              : null,
+          })
+        : formatEndlessShare(
+            state.score,
+            state.stats.loopsCreated,
+            Math.max(1, state.stats.longestCombo),
+            levelDisplayName(state.difficultyLevel),
+          );
     const ok = await shareText(text);
     setShareNote(ok ? "Copied / shared" : "Unable to share");
     setTimeout(() => setShareNote(null), 1600);
@@ -429,8 +857,7 @@ export function GameApp() {
                 clearSession();
                 setHasSession(false);
                 clearPathUi();
-                dispatch({ type: "REPLACE", state: newEndlessGame() });
-                setView("play");
+                setView("levels");
               }}
             >
               New Game
@@ -457,6 +884,45 @@ export function GameApp() {
     );
   }
 
+  if (view === "levels") {
+    const blurb: Record<DifficultyLevel, string> = {
+      easy: "Smaller palette · almost no specials",
+      medium: "Mixed board · light locks & wilds",
+      hard: "Full palette · more specials",
+    };
+    return (
+      <Shell>
+        <header className="flex items-center justify-between py-2">
+          <GhostButton onClick={() => setView("home")}>← Back</GhostButton>
+        </header>
+        <main className="flex flex-1 flex-col items-center justify-center gap-6 py-8">
+          <div className="text-center">
+            <h2 className="font-[family-name:var(--font-display)] text-3xl font-semibold tracking-tight">
+              Choose level
+            </h2>
+            <p className="mt-2 text-sm text-[#1E2A32]/55">
+              Difficulty stays fixed for the run
+            </p>
+          </div>
+          <div className="flex w-full max-w-xs flex-col gap-3">
+            {(["easy", "medium", "hard"] as const).map((level) => (
+              <PrimaryButton
+                key={level}
+                onClick={() => beginEndless(level)}
+                className="w-full"
+              >
+                <span className="block text-lg">{LEVEL_PRESETS[level].label}</span>
+                <span className="mt-0.5 block text-xs font-normal opacity-70">
+                  {blurb[level]}
+                </span>
+              </PrimaryButton>
+            ))}
+          </div>
+        </main>
+      </Shell>
+    );
+  }
+
   if (view === "how") {
     return (
       <Shell>
@@ -470,6 +936,14 @@ export function GameApp() {
           <HowToPlayVideo />
           <div className="space-y-2 px-1 text-sm text-[#1E2A32]/55">
             <p>Same symbol or color · max 2 links · close a loop of 4+.</p>
+            <p>
+              ★ Wilds match anything · 🔒 locks open beside a clear · ↗ bridges
+              link diagonally.
+            </p>
+            <p>
+              Chain clears for combo fever · hints show a path then clear it for
+              you.
+            </p>
             <p>Wrong connections can block future moves. Think ahead.</p>
           </div>
         </div>
@@ -478,6 +952,7 @@ export function GameApp() {
   }
 
   if (view === "stats") {
+    const marks = streakCalendarMarks(streak.solvedDates, 14);
     return (
       <Shell>
         <header className="flex items-center justify-between py-2">
@@ -486,6 +961,29 @@ export function GameApp() {
         <h2 className="font-[family-name:var(--font-display)] text-2xl font-semibold">
           Statistics
         </h2>
+        <div className="mt-5 rounded-2xl bg-black/[0.03] px-4 py-3">
+          <p className="text-xs uppercase tracking-wider text-[#1E2A32]/4">
+            Daily streak
+          </p>
+          <p className="mt-1 text-lg font-semibold tabular-nums">
+            {streak.current}{" "}
+            <span className="text-sm font-normal text-[#1E2A32]/45">
+              (best {streak.best})
+            </span>
+          </p>
+          <div className="mt-3 flex gap-1">
+            {marks.map((m) => (
+              <span
+                key={m.date}
+                title={m.date}
+                className={[
+                  "h-2.5 flex-1 rounded-full",
+                  m.solved ? "bg-[#2A9D8F]" : "bg-black/10",
+                ].join(" ")}
+              />
+            ))}
+          </div>
+        </div>
         <dl className="mt-6 space-y-3 text-sm">
           {(
             [
@@ -569,64 +1067,55 @@ export function GameApp() {
           {showDailyHud ? "DAILY" : "LINK"}
         </div>
         <div className="flex items-center">
-          {pathIds.length > 1 ? (
-            <IconButton label="Cancel path" onClick={cancelPath}>
-              Cancel
-            </IconButton>
-          ) : null}
           <IconButton
             label="Hint"
             disabled={
-              hintsLeft <= 0 ||
               state.gameOver ||
               state.dailySolved ||
-              view === "tutorial"
+              view === "tutorial" ||
+              mathOpen ||
+              guideActive
             }
             onClick={useHint}
           >
-            Hint ({hintsLeft}/{STARTING_HINTS})
-          </IconButton>
-          <IconButton
-            label="Undo"
-            disabled={state.history.length === 0 && pathIds.length <= 1}
-            onClick={() => {
-              setHintIds([]);
-              setHintEdges([]);
-              // During an active path: step back one link (free)
-              if (pathIds.length > 1 || pathStepsRef.current > 0) {
-                const path = pathIdsRef.current;
-                if (path.length >= 2) {
-                  let s = reduce(stateRef.current, { type: "REVERT" });
-                  stateRef.current = s;
-                  dispatch({ type: "REPLACE", state: s });
-                  pathStepsRef.current = Math.max(0, pathStepsRef.current - 1);
-                  const nextPath = path.slice(0, -1);
-                  pathIdsRef.current = nextPath;
-                  setPathIds(nextPath);
-                  playSfx("select", settings.sound);
-                  return;
-                }
-                cancelPath();
-                return;
-              }
-              clearPathUi();
-              dispatch({ type: "UNDO" });
-            }}
-          >
-            Undo
+            Hint ({hintsLeft}/{MAX_HINTS})
           </IconButton>
         </div>
       </header>
 
-      {showDailyHud && (
-        <p className="-mt-1 mb-2 text-center text-xs text-[#1E2A32]/45">
-          Today&apos;s Puzzle — clear the board in {state.dailyMoveLimit}{" "}
-          moves. Decoys &amp; locks make it tricky; undos don&apos;t refund
-          moves.
-        </p>
+      {showDailyHud && state.dailyObjectives && state.dailyProgress && (
+        <div className="-mt-1 mb-2 space-y-1.5 rounded-2xl bg-black/[0.03] px-3 py-2">
+          <p className="text-center text-[11px] uppercase tracking-wider text-[#1E2A32]/4">
+            Today&apos;s goals
+            {streak.current > 0 ? ` · streak ${streak.current}` : ""}
+          </p>
+          <ul className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-xs text-[#1E2A32]/7">
+            <li>
+              {(state.dailyProgress.bestLoopSize >=
+              state.dailyObjectives.minLoopSize
+                ? "✓"
+                : "○")}{" "}
+              loop ≥{state.dailyObjectives.minLoopSize}
+            </li>
+            <li>
+              {(state.dailyProgress.wildsUsed <=
+              state.dailyObjectives.maxWildUses
+                ? "✓"
+                : "○")}{" "}
+              ≤{state.dailyObjectives.maxWildUses} wild
+            </li>
+            <li>
+              {(state.score >= state.dailyObjectives.targetScore ? "✓" : "○")} ≥
+              {state.dailyObjectives.targetScore} pts
+            </li>
+          </ul>
+          <p className="text-center text-[11px] text-[#1E2A32]/4">
+            Clear the board in {state.dailyMoveLimit} moves
+          </p>
+        </div>
       )}
 
-      <div className="mb-3 flex items-end justify-between px-1">
+      <div className="mb-3 flex items-end justify-between gap-3 px-1">
         <div>
           <div className="text-xs uppercase tracking-wider text-[#1E2A32]/40">
             Score
@@ -634,6 +1123,23 @@ export function GameApp() {
           <div className="text-3xl font-semibold tabular-nums tracking-tight">
             {state.score}
           </div>
+          {!showDailyHud && (
+            <div className="mt-0.5 text-[11px] text-[#1E2A32]/4">
+              {levelDisplayName(state.difficultyLevel)} · Stage{" "}
+              {state.difficultyStage + 1} ·{" "}
+              {
+                DIFFICULTY_STAGES[
+                  Math.min(state.difficultyStage, DIFFICULTY_STAGES.length - 1)
+                ]!.symbols
+              }
+              ×
+              {
+                DIFFICULTY_STAGES[
+                  Math.min(state.difficultyStage, DIFFICULTY_STAGES.length - 1)
+                ]!.colors
+              }
+            </div>
+          )}
         </div>
         <div className="text-right">
           {showDailyHud ? (
@@ -646,21 +1152,16 @@ export function GameApp() {
               </div>
             </>
           ) : (
-            <>
-              <div className="text-xs uppercase tracking-wider text-[#1E2A32]/40">
-                Combo
-              </div>
-              <div
-                className={`text-xl font-semibold tabular-nums transition ${
-                  state.combo > 1 ? "text-[#2A9D8F]" : "text-[#1E2A32]/50"
-                }`}
-              >
-                ×{state.combo}
-              </div>
-            </>
+            <ComboMeter combo={state.combo} broken={comboBroken} />
           )}
         </div>
       </div>
+
+      {(stageToast || teachToast) && (
+        <p className="mb-2 text-center text-sm font-medium text-[#2A9D8F] animate-[fadeCaption_280ms_ease-out]">
+          {teachToast ?? stageToast}
+        </p>
+      )}
 
       {view === "tutorial" && (
         <p className="mb-3 text-center text-sm font-medium text-[#1E2A32]/70">
@@ -678,14 +1179,83 @@ export function GameApp() {
         onPathEnd={onPathEnd}
         highlightIds={boardHighlights}
         hintEdges={view === "tutorial" ? [] : hintEdges}
+        guidePath={guidePath}
+        guideActive={guideActive}
       />
 
+      {mathOpen && mathChallenge && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/20 p-4 sm:items-center">
+          <div className="relative z-10 w-full max-w-sm rounded-3xl bg-[#FBFBFA] p-6 shadow-xl">
+            <h3 className="font-[family-name:var(--font-display)] text-xl font-semibold tracking-tight">
+              Quick puzzle
+            </h3>
+            <p className="mt-2 text-sm text-[#1E2A32]/55">
+              Solve this to continue.
+            </p>
+            <p className="mt-6 text-center font-[family-name:var(--font-display)] text-4xl font-semibold tracking-tight">
+              {mathChallenge.prompt} = ?
+            </p>
+            <input
+              type="number"
+              inputMode="numeric"
+              value={mathInput}
+              onChange={(e) => {
+                setMathInput(e.target.value);
+                setMathError(false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitMath();
+              }}
+              autoFocus
+              className={[
+                "mt-5 w-full rounded-2xl border bg-white px-4 py-3 text-center text-xl tabular-nums outline-none",
+                mathError
+                  ? "border-[#E85D4C] ring-2 ring-[#E85D4C]/20"
+                  : "border-black/10 focus:ring-2 focus:ring-[#2A9D8F]/25",
+              ].join(" ")}
+              placeholder="Answer"
+            />
+            {mathError && (
+              <p className="mt-2 text-center text-xs text-[#E85D4C]">
+                Not quite — try again
+              </p>
+            )}
+            <div className="mt-5 flex flex-col gap-2">
+              <PrimaryButton onClick={submitMath}>Continue</PrimaryButton>
+              <GhostButton
+                onClick={() => {
+                  setMathOpen(false);
+                  setMathChallenge(null);
+                  pendingGuideRef.current = null;
+                  setMathInput("");
+                }}
+              >
+                Cancel
+              </GhostButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {freeHintFlash && (
+        <p className="mt-2 text-center text-sm font-medium text-[#2A9D8F]">
+          Free hint earned!
+        </p>
+      )}
+
+      {guideActive && (
+        <p className="mt-3 text-center text-sm font-medium text-[#E9A319]">
+          {guideWillComplete
+            ? "Showing path… then clearing"
+            : "A nudge — half the path"}
+        </p>
+      )}
+
       <p className="mt-4 text-center text-xs text-[#1E2A32]/35">
-        Drag through tiles to link · Cancel undoes the whole path
+        Drag a full loop to clear · lift early and the path is discarded
         {hintIds.length > 0
           ? ` · best loop: ${hintIds.length} tiles (~${hintScore} pts)`
           : ""}
-        {hintPenaltyFlash != null ? ` · hint −${hintPenaltyFlash}` : ""}
       </p>
 
       {(state.gameOver || state.dailySolved) && (
@@ -700,9 +1270,36 @@ export function GameApp() {
           onClose={() => setView("home")}
         >
           {state.dailySolved ? (
-            <p className="mb-4 text-[#1E2A32]/65">
-              {state.moveCount} Moves
-            </p>
+            <div className="mb-4 space-y-2 text-sm text-[#1E2A32]/65">
+              <p>
+                {state.moveCount} moves · {state.score} pts
+                {streak.current > 0 ? ` · streak ${streak.current}` : ""}
+              </p>
+              {state.dailyObjectives && state.dailyProgress && (
+                <ul className="space-y-1 text-xs">
+                  <li>
+                    {state.dailyProgress.bestLoopSize >=
+                    state.dailyObjectives.minLoopSize
+                      ? "✓"
+                      : "○"}{" "}
+                    Loop ≥{state.dailyObjectives.minLoopSize}
+                  </li>
+                  <li>
+                    {state.dailyProgress.wildsUsed <=
+                    state.dailyObjectives.maxWildUses
+                      ? "✓"
+                      : "○"}{" "}
+                    ≤{state.dailyObjectives.maxWildUses} wild uses
+                  </li>
+                  <li>
+                    {state.score >= state.dailyObjectives.targetScore
+                      ? "✓"
+                      : "○"}{" "}
+                    ≥{state.dailyObjectives.targetScore} score
+                  </li>
+                </ul>
+              )}
+            </div>
           ) : (
             <dl className="mb-5 space-y-2 text-sm">
               <div className="flex justify-between">
@@ -714,22 +1311,20 @@ export function GameApp() {
                 <dd className="font-semibold tabular-nums">{best}</dd>
               </div>
               <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Loops Created</dt>
-                <dd className="font-semibold tabular-nums">
-                  {state.stats.loopsCreated}
-                </dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Largest Loop</dt>
+                <dt className="text-[#1E2A32]/5">Largest loop</dt>
                 <dd className="font-semibold tabular-nums">
                   {state.stats.largestLoop}
                 </dd>
               </div>
               <div className="flex justify-between">
-                <dt className="text-[#1E2A32]/5">Longest Combo</dt>
+                <dt className="text-[#1E2A32]/5">Max combo</dt>
                 <dd className="font-semibold tabular-nums">
-                  ×{state.stats.longestCombo}
+                  ×{Math.max(1, state.stats.longestCombo)}
                 </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-[#1E2A32]/5">Hints left</dt>
+                <dd className="font-semibold tabular-nums">{hintsLeft}</dd>
               </div>
             </dl>
           )}
@@ -744,8 +1339,7 @@ export function GameApp() {
                 clearSession();
                 if (state.mode === "daily") startDaily();
                 else {
-                  dispatch({ type: "REPLACE", state: newEndlessGame() });
-                  setView("play");
+                  beginEndless(state.difficultyLevel ?? selectedLevel);
                 }
               }}
             >
