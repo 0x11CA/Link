@@ -64,6 +64,12 @@ export const MAX_HINTS = 5;
 export const FREE_HINT_EVERY_CLEARS = 5;
 /** After this many connections with no clear, gently offer help once. */
 export const FAILED_TRIES_BEFORE_HELP = 8;
+/**
+ * When out of hints, a math-earned full guide awards this fraction of the
+ * normal clear score (still at least HINT_ZERO_MIN_SCORE).
+ */
+export const HINT_ZERO_SCORE_MULT = 0.1;
+export const HINT_ZERO_MIN_SCORE = 5;
 
 export const DAILY_MOVE_LIMIT = 13;
 export const BOARD_GEN_MAX_ATTEMPTS = 80;
