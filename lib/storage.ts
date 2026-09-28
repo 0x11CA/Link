@@ -198,6 +198,8 @@ export function loadSession(): GameState | null {
     if (parsed.preClearSnapshot === undefined) {
       parsed.preClearSnapshot = null;
     }
+    if (parsed.dailyDate === undefined) parsed.dailyDate = null;
+    if (typeof parsed.dailyStage !== "number") parsed.dailyStage = 0;
     // Drop legacy level field if present
     delete (parsed as { difficultyLevel?: unknown }).difficultyLevel;
     return parsed;

@@ -259,3 +259,16 @@ export function suggestHint(state: GameState): HintSuggestion | null {
     potentialScore: scoreLoop(n, combo),
   };
 }
+
+/** Daily-only: connection is legal only if it lies on the longest completable loop. */
+export function isEdgeOnLongestLoop(
+  state: GameState,
+  a: TileId,
+  b: TileId,
+): boolean {
+  const hint = suggestHint(state);
+  if (!hint) return false;
+  return hint.edges.some(
+    (e) => (e.a === a && e.b === b) || (e.a === b && e.b === a),
+  );
+}

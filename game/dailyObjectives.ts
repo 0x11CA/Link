@@ -13,16 +13,15 @@ export function emptyDailyProgress(objectives: DailyObjectives): DailyProgress {
 }
 
 /**
- * Seeded daily bonus goals from the date string.
- * Always achievable-ish: loop size 4/6/8, score target scaled to board pressure.
+ * Seeded daily bonus goals — three stages, longest-path focus.
  */
 export function createDailyObjectives(dateStr: string): DailyObjectives {
   const seed = dailySeed(dateStr);
   const rng = createRng(seed ^ 0x0b7ec7);
-  const roll = rng();
-  const minLoopSize = roll < 0.45 ? 4 : roll < 0.8 ? 6 : 8;
-  const maxWildUses = rng() < 0.55 ? 1 : 0;
-  const targetScore = 80 + Math.floor(rng() * 5) * 40 + (minLoopSize - 4) * 20;
+  // Complete all three stages; bonus goals lean toward longer clears
+  const minLoopSize = 6;
+  const maxWildUses = rng() < 0.5 ? 2 : 1;
+  const targetScore = 200 + Math.floor(rng() * 4) * 40;
   return { minLoopSize, maxWildUses, targetScore };
 }
 

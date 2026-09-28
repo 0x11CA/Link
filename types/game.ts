@@ -94,6 +94,10 @@ export interface GameState {
   /** Present in daily mode. */
   dailyObjectives: DailyObjectives | null;
   dailyProgress: DailyProgress | null;
+  /** Daily date key (YYYY-MM-DD) for multi-stage boards. */
+  dailyDate: string | null;
+  /** Daily stage index: 0 easy, 1 medium, 2 hard. */
+  dailyStage: number;
   /** Endless: undos left to recover from softlock Game Over (max 3 per run). */
   recoveryUndosLeft: number;
   /** Board/score before the clear that may have softlocked; used by RECOVER_UNDO. */

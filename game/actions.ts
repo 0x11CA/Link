@@ -18,7 +18,7 @@ import {
   STARTING_UNDOS,
   UNDO_EARN_LOOP_SIZE,
 } from "@/game/config";
-import { generateDailyBoard, dailyMoveLimitFor } from "@/game/dailyBoard";
+import { generateDailyBoard, dailyMoveLimitFor, dailyDifficultyForStage } from "@/game/dailyBoard";
 import {
   createDailyObjectives,
   emptyDailyProgress,
@@ -26,6 +26,7 @@ import {
 } from "@/game/dailyObjectives";
 import { nextDifficultyStage } from "@/game/difficulty";
 import { hasLegalMoves } from "@/game/gameOver";
+import { isEdgeOnLongestLoop } from "@/game/hints";
 import { findCycleClosedByEdge } from "@/game/loops";
 import { createRng } from "@/game/rng";
 import { scoreLoop } from "@/game/scoring";
@@ -100,16 +101,36 @@ function clearAllConnections(
 
 function withGameOverCheck(state: GameState): GameState {
   if (state.mode === "daily") {
-    if (isBoardEmpty(state.board)) {
+    // Each stage is cleared by completing its longest loop once
+    if (state.lastClearSize != null) {
+      if (state.dailyDate && state.dailyStage < 2) {
+        const nextStage = state.dailyStage + 1;
+        const gen = generateDailyBoard(state.dailyDate, nextStage);
+        const label = dailyDifficultyForStage(nextStage);
+        return {
+          ...state,
+          board: gen.board,
+          rngState: gen.rngState,
+          dailyStage: nextStage,
+          history: [],
+          selectedId: null,
+          dailySolved: false,
+          dailyFailed: false,
+          gameOver: false,
+          message: `${label[0]!.toUpperCase()}${label.slice(1)} stage`,
+          preClearSnapshot: null,
+        };
+      }
       return {
         ...state,
+        board: emptyBoard(),
         dailySolved: true,
         gameOver: false,
         message: "Solved!",
         preClearSnapshot: null,
       };
     }
-    if (state.moveCount >= state.dailyMoveLimit && !isBoardEmpty(state.board)) {
+    if (state.moveCount >= state.dailyMoveLimit) {
       return {
         ...state,
         dailyFailed: true,
@@ -219,6 +240,8 @@ export function createInitialState(opts: CreateStateOptions = {}): GameState {
     message: null,
     dailyObjectives: null,
     dailyProgress: null,
+    dailyDate: null,
+    dailyStage: 0,
     recoveryUndosLeft: mode === "endless" ? STARTING_RECOVERY_UNDOS : 0,
     preClearSnapshot: null,
   };
@@ -244,7 +267,7 @@ export function reduce(state: GameState, action: GameAction): GameState {
     if (!state.gameOver) return state;
     if (state.recoveryUndosLeft <= 0 || !state.preClearSnapshot) return state;
     const restored = restore(state, state.preClearSnapshot);
-    return {
+    return withGameOverCheck({
       ...restored,
       board: clearAllConnections(restored.board),
       gameOver: false,
@@ -255,7 +278,7 @@ export function reduce(state: GameState, action: GameAction): GameState {
       message: null,
       dailyObjectives: state.dailyObjectives,
       dailyProgress: state.dailyProgress,
-    };
+    });
   }
 
   if (action.type === "ACCEPT_GAME_OVER") {
@@ -346,6 +369,18 @@ export function reduce(state: GameState, action: GameAction): GameState {
           ...state,
           selectedId: null,
           message: null,
+        };
+      }
+
+      // Daily: only edges on the current longest completable loop
+      if (
+        state.mode === "daily" &&
+        !isEdgeOnLongestLoop(state, action.fromId, action.toId)
+      ) {
+        return {
+          ...state,
+          selectedId: null,
+          message: "Only the longest path",
         };
       }
 
@@ -472,7 +507,7 @@ export function newEndlessGame(seed?: number): GameState {
 }
 
 export function newDailyGame(dateStr: string): GameState {
-  const { board, seed, rngState, tileCount } = generateDailyBoard(dateStr);
+  const { board, seed, rngState, tileCount } = generateDailyBoard(dateStr, 0);
   const objectives = createDailyObjectives(dateStr);
   const state = createInitialState({
     mode: "daily",
@@ -483,8 +518,11 @@ export function newDailyGame(dateStr: string): GameState {
   });
   return {
     ...state,
+    dailyDate: dateStr,
+    dailyStage: 0,
     dailyObjectives: objectives,
     dailyProgress: emptyDailyProgress(objectives),
+    message: "Easy stage — longest path only",
   };
 }
 

@@ -22,6 +22,7 @@ import {
   generateDailyBoard,
 } from "@/game/dailyBoard";
 import { isGameOver, hasLegalMoves } from "@/game/gameOver";
+import { isEdgeOnLongestLoop, suggestHint } from "@/game/hints";
 import type { GameState, Tile } from "@/types/game";
 
 function tile(
@@ -375,6 +376,52 @@ describe("game over", () => {
     expect(recovered.board[0]![1]!.connections).toEqual([]);
   });
 
+  it("recover into a board with no legal moves softlocks again immediately", () => {
+    const stuck = Array.from({ length: 5 }, (_, r) =>
+      Array.from({ length: 5 }, (_, c) =>
+        tile({
+          id: `dead-${r}-${c}`,
+          row: r,
+          col: c,
+          symbol: "circle",
+          color: "coral",
+          locked: true,
+        }),
+      ),
+    );
+    const softlocked: GameState = {
+      ...stateFromBoard(stuck),
+      gameOver: true,
+      message: "No moves left",
+      recoveryUndosLeft: 2,
+      preClearSnapshot: {
+        board: cloneBoard(stuck),
+        score: 10,
+        combo: 1,
+        undosLeft: 3,
+        difficultyStage: 0,
+        clearsCount: 0,
+        stats: {
+          loopsCreated: 0,
+          largestLoop: 0,
+          longestCombo: 0,
+          totalConnections: 0,
+        },
+        moveCount: 0,
+        dailySolved: false,
+        gameOver: false,
+        lastClearSize: null,
+        lastScoreGain: null,
+        closedLoop: false,
+      },
+    };
+    const recovered = reduce(softlocked, { type: "RECOVER_UNDO" });
+    expect(recovered.recoveryUndosLeft).toBe(1);
+    expect(recovered.gameOver).toBe(true);
+    expect(recovered.message).toBe("No moves left");
+    expect(recovered.preClearSnapshot).toBeNull();
+  });
+
   it("after 3 recovers, further recover is denied", () => {
     const makeSnap = (tag: string) => ({
       board: Array.from({ length: 5 }, (_, r) =>
@@ -586,15 +633,40 @@ describe("reduce connect + clear", () => {
 });
 
 describe("daily sparse puzzle", () => {
-  it("has a denser harder board and limited moves", () => {
-    const { board, tileCount } = generateDailyBoard("2026-09-20");
-    expect(allTiles(board).length).toBe(tileCount);
-    expect(tileCount).toBeGreaterThanOrEqual(12);
+  it("has three staged boards and a shared move budget", () => {
+    const easy = generateDailyBoard("2026-09-20", 0);
+    const medium = generateDailyBoard("2026-09-20", 1);
+    const hard = generateDailyBoard("2026-09-20", 2);
+    expect(easy.difficulty).toBe("easy");
+    expect(medium.difficulty).toBe("medium");
+    expect(hard.difficulty).toBe("hard");
+    expect(allTiles(easy.board).length).toBe(easy.tileCount);
+    expect(easy.tileCount).toBeGreaterThanOrEqual(4);
 
     const state = newDailyGame("2026-09-20");
-    expect(state.dailyMoveLimit).toBeLessThanOrEqual(14);
-    expect(state.dailyMoveLimit).toBeGreaterThanOrEqual(12);
+    expect(state.dailyStage).toBe(0);
+    expect(state.dailyDate).toBe("2026-09-20");
+    expect(state.dailyMoveLimit).toBe(30);
     expect(listLegalConnections(state).length).toBeGreaterThan(0);
+  });
+
+  it("rejects connections that are not on the longest path", () => {
+    const state = newDailyGame("2026-09-21");
+    const hint = suggestHint(state);
+    expect(hint).not.toBeNull();
+    // Find any legal edge not on the longest loop
+    const edges = listLegalConnections(state);
+    const off = edges.find(
+      (e) => !isEdgeOnLongestLoop(state, e.a, e.b),
+    );
+    if (!off) {
+      // All legal edges are on the longest path — still ok
+      expect(hint!.edges.length).toBeGreaterThan(0);
+      return;
+    }
+    const next = reduce(state, { type: "CONNECT", fromId: off.a, toId: off.b });
+    expect(next.message).toBe("Only the longest path");
+    expect(next.stats.totalConnections).toBe(state.stats.totalConnections);
   });
 });
 

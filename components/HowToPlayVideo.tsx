@@ -18,19 +18,31 @@ type Scene = {
   glowIds: number[];
   clearIds: number[];
   score?: boolean;
+  scoreLabel?: string;
 };
 
 const PALETTE = ["#E85D4C", "#2A9D8F", "#4A6FA5", "#E9A319"] as const;
 
-/** Center 2×2 used for the demo loop (row-major indices on 5×5). */
+/** Longer demo loop (6 tiles) — teaches aiming past the minimum 4. */
 const LOOP = {
-  tl: 1 * SIZE + 1, // (1,1)
-  tr: 1 * SIZE + 2, // (1,2)
-  br: 2 * SIZE + 2, // (2,2)
-  bl: 2 * SIZE + 1, // (2,1)
+  a: 1 * SIZE + 1, // (1,1)
+  b: 1 * SIZE + 2, // (1,2)
+  c: 1 * SIZE + 3, // (1,3)
+  d: 2 * SIZE + 3, // (2,3)
+  e: 2 * SIZE + 2, // (2,2)
+  f: 2 * SIZE + 1, // (2,1)
 } as const;
 
-const LOOP_IDS = [LOOP.tl, LOOP.tr, LOOP.br, LOOP.bl];
+const LOOP_IDS = [LOOP.a, LOOP.b, LOOP.c, LOOP.d, LOOP.e, LOOP.f];
+
+const PATH_STEPS: number[][] = [
+  [LOOP.a],
+  [LOOP.a, LOOP.b],
+  [LOOP.a, LOOP.b, LOOP.c],
+  [LOOP.a, LOOP.b, LOOP.c, LOOP.d],
+  [LOOP.a, LOOP.b, LOOP.c, LOOP.d, LOOP.e],
+  [LOOP.a, LOOP.b, LOOP.c, LOOP.d, LOOP.e, LOOP.f],
+];
 
 function buildBoard(): TileDef[] {
   const board: TileDef[] = [];
@@ -41,11 +53,13 @@ function buildBoard(): TileDef[] {
       color: PALETTE[i % 4]!,
     });
   }
-  // Force a clearable 2×2 in the center (same symbol/color edges)
-  board[LOOP.tl] = { symbol: "circle", color: PALETTE[0] };
-  board[LOOP.tr] = { symbol: "circle", color: PALETTE[1] };
-  board[LOOP.br] = { symbol: "square", color: PALETTE[1] };
-  board[LOOP.bl] = { symbol: "square", color: PALETTE[0] };
+  // Forced 6-cycle: match on symbol or color along each edge
+  board[LOOP.a] = { symbol: "circle", color: PALETTE[0] };
+  board[LOOP.b] = { symbol: "circle", color: PALETTE[1] };
+  board[LOOP.c] = { symbol: "triangle", color: PALETTE[1] };
+  board[LOOP.d] = { symbol: "triangle", color: PALETTE[2] };
+  board[LOOP.e] = { symbol: "square", color: PALETTE[2] };
+  board[LOOP.f] = { symbol: "square", color: PALETTE[0] };
   return board;
 }
 
@@ -60,76 +74,90 @@ const SCENES: Scene[] = [
     clearIds: [],
   },
   {
-    caption: "Tap a tile…",
-    selected: [LOOP.tl],
+    caption: "Drag along matching tiles — same symbol or color.",
+    selected: PATH_STEPS[0]!,
     edges: [],
-    glowIds: [],
-    clearIds: [],
-  },
-  {
-    caption: "…then a match — same symbol or color.",
-    selected: [LOOP.tl, LOOP.tr],
-    edges: [],
-    glowIds: [],
-    clearIds: [],
-  },
-  {
-    caption: "A link appears.",
-    selected: [],
-    edges: [[LOOP.tl, LOOP.tr]],
     glowIds: [],
     clearIds: [],
   },
   {
     caption: "Each tile can have only 2 links.",
-    selected: [LOOP.tr],
-    edges: [[LOOP.tl, LOOP.tr]],
+    selected: PATH_STEPS[1]!,
+    edges: [[LOOP.a, LOOP.b]],
     glowIds: [],
     clearIds: [],
   },
   {
-    caption: "Keep connecting…",
-    selected: [],
+    caption: "Keep going — don’t stop at 4 if you can grow the path.",
+    selected: PATH_STEPS[2]!,
     edges: [
-      [LOOP.tl, LOOP.tr],
-      [LOOP.tr, LOOP.br],
+      [LOOP.a, LOOP.b],
+      [LOOP.b, LOOP.c],
     ],
     glowIds: [],
     clearIds: [],
   },
   {
-    caption: "…and close the loop.",
-    selected: [],
+    caption: "Longer paths score more.",
+    selected: PATH_STEPS[3]!,
     edges: [
-      [LOOP.tl, LOOP.tr],
-      [LOOP.tr, LOOP.br],
-      [LOOP.br, LOOP.bl],
+      [LOOP.a, LOOP.b],
+      [LOOP.b, LOOP.c],
+      [LOOP.c, LOOP.d],
     ],
     glowIds: [],
     clearIds: [],
   },
   {
-    caption: "Loop complete!",
+    caption: "Aim for the longest loop you can close.",
+    selected: PATH_STEPS[4]!,
+    edges: [
+      [LOOP.a, LOOP.b],
+      [LOOP.b, LOOP.c],
+      [LOOP.c, LOOP.d],
+      [LOOP.d, LOOP.e],
+    ],
+    glowIds: [],
+    clearIds: [],
+  },
+  {
+    caption: "Close the loop back to the start.",
+    selected: PATH_STEPS[5]!,
+    edges: [
+      [LOOP.a, LOOP.b],
+      [LOOP.b, LOOP.c],
+      [LOOP.c, LOOP.d],
+      [LOOP.d, LOOP.e],
+      [LOOP.e, LOOP.f],
+    ],
+    glowIds: [],
+    clearIds: [],
+  },
+  {
+    caption: "6-tile loop — bigger than the minimum.",
     selected: [],
     edges: [
-      [LOOP.tl, LOOP.tr],
-      [LOOP.tr, LOOP.br],
-      [LOOP.br, LOOP.bl],
-      [LOOP.bl, LOOP.tl],
+      [LOOP.a, LOOP.b],
+      [LOOP.b, LOOP.c],
+      [LOOP.c, LOOP.d],
+      [LOOP.d, LOOP.e],
+      [LOOP.e, LOOP.f],
+      [LOOP.f, LOOP.a],
     ],
     glowIds: LOOP_IDS,
     clearIds: [],
   },
   {
-    caption: "Tiles clear. You score.",
+    caption: "Tiles clear. Longer loops pay more.",
     selected: [],
     edges: [],
     glowIds: [],
     clearIds: LOOP_IDS,
     score: true,
+    scoreLabel: "+120",
   },
   {
-    caption: "New tiles fall in. Keep going.",
+    caption: "New tiles fall in. Hunt the longest path again.",
     selected: [],
     edges: [],
     glowIds: [],
@@ -137,7 +165,7 @@ const SCENES: Scene[] = [
   },
 ];
 
-const SCENE_MS = 1400;
+const SCENE_MS = 1500;
 
 function Glyph({ kind, color }: { kind: SymbolKind; color: string }) {
   const cls = "h-[55%] w-[55%]";
@@ -279,7 +307,7 @@ export function HowToPlayVideo() {
         {scene.score && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
             <span className="animate-[popScore_900ms_ease-out_forwards] text-3xl font-semibold text-[#2A9D8F]">
-              +60
+              {scene.scoreLabel ?? "+60"}
             </span>
           </div>
         )}

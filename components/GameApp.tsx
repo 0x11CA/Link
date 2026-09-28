@@ -24,7 +24,8 @@ import {
   streakCalendarMarks,
 } from "@/game/daily";
 import { countObjectivesMet } from "@/game/dailyObjectives";
-import { suggestHint } from "@/game/hints";
+import { dailyDifficultyForStage } from "@/game/dailyBoard";
+import { isEdgeOnLongestLoop, suggestHint } from "@/game/hints";
 import {
   FAILED_TRIES_BEFORE_HELP,
   FREE_HINT_EVERY_CLEARS,
@@ -142,6 +143,7 @@ export function GameApp() {
   const [guideActive, setGuideActive] = useState(false);
   const [guideWillComplete, setGuideWillComplete] = useState(false);
   const [hintThinkActive, setHintThinkActive] = useState(false);
+  const [boardCoachActive, setBoardCoachActive] = useState(false);
   const [freeHintFlash, setFreeHintFlash] = useState(false);
   const [mathOpen, setMathOpen] = useState(false);
   const [mathChallenge, setMathChallenge] = useState<{
@@ -173,6 +175,11 @@ export function GameApp() {
   } | null>(null);
   /** When true, next auto-complete from a math-earned guide uses minimal score. */
   const minimalHintScoreRef = useRef(false);
+  /** Out-of-hints: block Hint until clear or more failed tries after a math peek. */
+  const zeroHintCooldownRef = useRef(false);
+  const [zeroHintCooldown, setZeroHintCooldown] = useState(false);
+  /** Show longest-path coach when a fresh board appears. */
+  const pendingBoardCoachRef = useRef(false);
   const prevComboRef = useRef(1);
   const prevStageRef = useRef(0);
   const pathStepsRef = useRef(0);
@@ -321,7 +328,13 @@ export function GameApp() {
       helpOfferedThisStreak.current = false;
       pendingGuideRef.current = null;
       minimalHintScoreRef.current = false;
+      zeroHintCooldownRef.current = false;
+      setZeroHintCooldown(false);
       setHintThinkActive(false);
+      // New board after refill — coach the longest path (endless only)
+      if (state.mode === "endless") {
+        pendingBoardCoachRef.current = true;
+      }
 
       // Every 5 clears → free hint
       const clears = state.clearsCount;
@@ -333,6 +346,8 @@ export function GameApp() {
       ) {
         lastClearsForFreeHint.current = clears;
         setHintsLeft((n) => Math.min(MAX_HINTS, n + 1));
+        zeroHintCooldownRef.current = false;
+        setZeroHintCooldown(false);
         setFreeHintFlash(true);
         window.setTimeout(() => setFreeHintFlash(false), 1600);
         playSfx("combo", settings.sound);
@@ -420,8 +435,14 @@ export function GameApp() {
     failedTriesRef.current = 0;
     helpOfferedThisStreak.current = false;
     lastClearsForFreeHint.current = 0;
+    zeroHintCooldownRef.current = false;
+    setZeroHintCooldown(false);
+    setHintThinkActive(false);
+    setBoardCoachActive(false);
+    pendingGuideRef.current = null;
     clearPathUi();
     if (!isTutorialDone()) {
+      pendingBoardCoachRef.current = false;
       dispatch({ type: "REPLACE", state: buildTutorialState() });
       setTutorialStep(1);
       setView("tutorial");
@@ -429,8 +450,10 @@ export function GameApp() {
     }
     const saved = loadSession();
     if (saved && !saved.gameOver && saved.score >= 0) {
+      pendingBoardCoachRef.current = false;
       dispatch({ type: "REPLACE", state: saved });
     } else {
+      pendingBoardCoachRef.current = true;
       dispatch({ type: "REPLACE", state: newEndlessGame() });
     }
     setView("play");
@@ -443,6 +466,12 @@ export function GameApp() {
     failedTriesRef.current = 0;
     helpOfferedThisStreak.current = false;
     lastClearsForFreeHint.current = 0;
+    zeroHintCooldownRef.current = false;
+    setZeroHintCooldown(false);
+    setHintThinkActive(false);
+    setBoardCoachActive(false);
+    pendingGuideRef.current = null;
+    pendingBoardCoachRef.current = false;
     clearPathUi();
     dispatch({ type: "REPLACE", state: newDailyGame(dateKey()) });
     setView("daily");
@@ -471,7 +500,7 @@ export function GameApp() {
   }, [clearPathUi, settings.sound]);
 
   const applyHintLoop = useCallback(
-    (tileIds: string[], options?: { minimalScore?: boolean }) => {
+    (tileIds: string[], options?: { minimalScore?: boolean; zeroScore?: boolean }) => {
       // Cancel any in-progress drag path first
       const steps = pathStepsRef.current;
       let s = stateRef.current;
@@ -492,8 +521,14 @@ export function GameApp() {
         s = reduce(s, { type: "CONNECT", fromId: a, toId: b });
       }
 
-      // Out-of-hints math assist: award only a tiny slice of the clear score
-      if (options?.minimalScore && s.lastScoreGain && s.lastScoreGain > 0) {
+      if (options?.zeroScore && s.lastScoreGain && s.lastScoreGain > 0) {
+        const delta = s.lastScoreGain;
+        s = {
+          ...s,
+          score: Math.max(0, s.score - delta),
+          lastScoreGain: 0,
+        };
+      } else if (options?.minimalScore && s.lastScoreGain && s.lastScoreGain > 0) {
         const tiny = Math.max(
           HINT_ZERO_MIN_SCORE,
           Math.round(s.lastScoreGain * HINT_ZERO_SCORE_MULT),
@@ -516,6 +551,7 @@ export function GameApp() {
       setGuideActive(false);
       setGuideWillComplete(false);
       setHintThinkActive(false);
+      setBoardCoachActive(false);
       pendingGuideRef.current = null;
       minimalHintScoreRef.current = false;
     },
@@ -532,6 +568,7 @@ export function GameApp() {
         /** Keep half-path highlights after the anim so the player can finish alone. */
         keepVisible?: boolean;
         minimalScore?: boolean;
+        zeroScore?: boolean;
       },
     ) => {
       if (guideTimerRef.current) {
@@ -543,6 +580,7 @@ export function GameApp() {
         Boolean(options?.complete) && stopAt >= tileIds.length;
       const keepVisible = Boolean(options?.keepVisible) && !shouldComplete;
       const minimalScore = Boolean(options?.minimalScore);
+      const zeroScore = Boolean(options?.zeroScore);
       const shownIds = tileIds.slice(0, stopAt);
       const shownEdges =
         stopAt < tileIds.length
@@ -569,7 +607,7 @@ export function GameApp() {
           }
           window.setTimeout(() => {
             if (shouldComplete) {
-              applyHintLoop(tileIds, { minimalScore });
+              applyHintLoop(tileIds, { minimalScore, zeroScore });
               bumpActivity();
             } else {
               setGuideActive(false);
@@ -589,7 +627,7 @@ export function GameApp() {
     [settings.sound, bumpActivity, applyHintLoop],
   );
 
-  /** Soft nudge / first Hint step — reveal half the route and ask the player to think. */
+  /** Soft nudge / zero-hint peek — reveal half the route. */
   const showHalfPathHint = useCallback(
     (
       tileIds: string[],
@@ -598,6 +636,7 @@ export function GameApp() {
     ) => {
       pendingGuideRef.current = { tileIds, edges, potentialScore };
       minimalHintScoreRef.current = false;
+      setBoardCoachActive(false);
       setHintScore(potentialScore);
       setHintThinkActive(true);
       playSolutionGuide(tileIds, edges, {
@@ -608,6 +647,22 @@ export function GameApp() {
     },
     [playSolutionGuide, settings.haptics],
   );
+
+  /** Every new board: show the longest completable loop (teach, do not auto-clear). */
+  const showLongestPathCoach = useCallback(() => {
+    if (stateRef.current.gameOver || stateRef.current.dailySolved) return;
+    const suggestion = suggestHint(stateRef.current);
+    if (!suggestion) return;
+    pendingGuideRef.current = null;
+    minimalHintScoreRef.current = false;
+    setHintThinkActive(false);
+    setHintScore(suggestion.potentialScore);
+    setBoardCoachActive(true);
+    playSolutionGuide(suggestion.tileIds, suggestion.edges, {
+      keepVisible: true,
+    });
+    haptic(settings.haptics, 8);
+  }, [playSolutionGuide, settings.haptics]);
 
   const onPathStart = useCallback(
     (tileId: string) => {
@@ -627,6 +682,7 @@ export function GameApp() {
       setHintEdges([]);
       setHintScore(0);
       setHintThinkActive(false);
+      setBoardCoachActive(false);
       // Drop any leftover clear FX from a previous loop
       if (stateRef.current.lastScoreGain || stateRef.current.lastClearSize) {
         const cleared = {
@@ -686,6 +742,13 @@ export function GameApp() {
         pulseReject(tileId);
         return;
       }
+      if (
+        s.mode === "daily" &&
+        !isEdgeOnLongestLoop(s, head, tileId)
+      ) {
+        pulseReject(tileId);
+        return;
+      }
 
       playSfx("connect", settings.sound);
       haptic(settings.haptics, 12);
@@ -693,6 +756,12 @@ export function GameApp() {
       stateRef.current = s;
       dispatch({ type: "REPLACE", state: s });
       pathStepsRef.current += 1;
+
+      if (s.message === "Only the longest path") {
+        pulseReject(tileId);
+        pathStepsRef.current = Math.max(0, pathStepsRef.current - 1);
+        return;
+      }
 
       if (s.lastClearSize) {
         // Loop completed — celebrate and reset path
@@ -723,12 +792,22 @@ export function GameApp() {
       failedTriesRef.current += 1;
       cancelPath();
       if (
+        zeroHintCooldownRef.current &&
+        failedTriesRef.current >= FAILED_TRIES_BEFORE_HELP
+      ) {
+        zeroHintCooldownRef.current = false;
+        setZeroHintCooldown(false);
+      }
+      if (
         !helpOfferedThisStreak.current &&
         !guideActive &&
         view !== "tutorial" &&
+        hintsLeft <= 0 &&
+        !zeroHintCooldownRef.current &&
         failedTriesRef.current >= FAILED_TRIES_BEFORE_HELP
       ) {
         helpOfferedThisStreak.current = true;
+        // Soft nudge only when out of hints — half path, never a free full solve
         const suggestion = suggestHint(stateRef.current);
         if (suggestion) {
           showHalfPathHint(
@@ -747,6 +826,7 @@ export function GameApp() {
     clearPathUi,
     guideActive,
     view,
+    hintsLeft,
     showHalfPathHint,
   ]);
 
@@ -754,23 +834,52 @@ export function GameApp() {
     bumpActivity();
     if (state.gameOver || state.dailySolved || mathOpen || guideActive) return;
 
-    // Already showed half-path — escalate to the full guide
-    const pending = pendingGuideRef.current;
-    if (pending) {
-      if (hintsLeft > 0) {
-        setHintsLeft((n) => n - 1);
-        setHintThinkActive(false);
-        setHintScore(pending.potentialScore);
-        playSfx("select", settings.sound);
-        haptic(settings.haptics, 10);
-        // Stock hint: real (full) points
-        playSolutionGuide(pending.tileIds, pending.edges, {
-          complete: true,
-          minimalScore: false,
-        });
+    // Daily: hints auto-clear the longest path for zero points
+    if (state.mode === "daily") {
+      if (hintsLeft <= 0) {
+        playSfx("reject", settings.sound);
         return;
       }
-      // Out of hints — earn a full guide via math (minimal points)
+      const suggestion = suggestHint(stateRef.current);
+      if (!suggestion) {
+        playSfx("reject", settings.sound);
+        return;
+      }
+      setHintsLeft((n) => n - 1);
+      setHintThinkActive(false);
+      setBoardCoachActive(false);
+      pendingGuideRef.current = null;
+      setHintScore(0);
+      playSfx("select", settings.sound);
+      haptic(settings.haptics, 10);
+      playSolutionGuide(suggestion.tileIds, suggestion.edges, {
+        complete: true,
+        zeroScore: true,
+      });
+      return;
+    }
+
+    // Out of hints — math gate → half path only (never auto-clear)
+    if (hintsLeft <= 0) {
+      if (zeroHintCooldownRef.current) {
+        playSfx("reject", settings.sound);
+        return;
+      }
+      let pending = pendingGuideRef.current;
+      if (!pending) {
+        const suggestion = suggestHint(stateRef.current);
+        if (!suggestion) {
+          playSfx("reject", settings.sound);
+          return;
+        }
+        pending = {
+          tileIds: suggestion.tileIds,
+          edges: suggestion.edges,
+          potentialScore: suggestion.potentialScore,
+        };
+        pendingGuideRef.current = pending;
+      }
+      setHintScore(pending.potentialScore);
       setMathChallenge(createMathChallenge());
       setMathInput("");
       setMathError(false);
@@ -779,30 +888,32 @@ export function GameApp() {
       return;
     }
 
+    // Stock left — spend 1 and full-clear immediately (real points)
     const suggestion = suggestHint(stateRef.current);
     if (!suggestion) {
       playSfx("reject", settings.sound);
       return;
     }
-
-    // First ask: think + half path (no hint charge spent yet)
+    setHintsLeft((n) => n - 1);
+    setHintThinkActive(false);
+    pendingGuideRef.current = null;
+    setHintScore(suggestion.potentialScore);
     playSfx("select", settings.sound);
     haptic(settings.haptics, 10);
-    showHalfPathHint(
-      suggestion.tileIds,
-      suggestion.edges,
-      suggestion.potentialScore,
-    );
+    playSolutionGuide(suggestion.tileIds, suggestion.edges, {
+      complete: true,
+      minimalScore: false,
+    });
   }, [
     state.gameOver,
     state.dailySolved,
+    state.mode,
     mathOpen,
     guideActive,
     hintsLeft,
     settings,
     bumpActivity,
     playSolutionGuide,
-    showHalfPathHint,
   ]);
 
   const submitMath = useCallback(() => {
@@ -820,17 +931,19 @@ export function GameApp() {
     setMathError(false);
     const pending = pendingGuideRef.current;
     if (pending) {
-      setHintThinkActive(false);
-      setHintScore(pending.potentialScore);
-      // Out-of-hints assist: lowest points
-      playSolutionGuide(pending.tileIds, pending.edges, {
-        complete: true,
-        minimalScore: true,
-      });
+      // Out of hints: half path only — never auto-clear
+      failedTriesRef.current = 0;
+      zeroHintCooldownRef.current = true;
+      setZeroHintCooldown(true);
+      showHalfPathHint(
+        pending.tileIds,
+        pending.edges,
+        pending.potentialScore,
+      );
     }
     playSfx("loop", settings.sound);
     haptic(settings.haptics, 10);
-  }, [mathChallenge, mathInput, settings, playSolutionGuide]);
+  }, [mathChallenge, mathInput, settings, showHalfPathHint]);
 
   const tutorialHighlights = useMemo(() => {
     if (view !== "tutorial") return [];
@@ -860,12 +973,37 @@ export function GameApp() {
     if (view === "tutorial" && tutorialStep >= 4 && state.stats.loopsCreated > 0) {
       const t = setTimeout(() => {
         setTutorialDone();
+        pendingBoardCoachRef.current = true;
         dispatch({ type: "REPLACE", state: newEndlessGame() });
         setView("play");
       }, 700);
       return () => clearTimeout(t);
     }
   }, [view, tutorialStep, state.stats.loopsCreated]);
+
+  // After a fresh board loads, teach the longest available path
+  useEffect(() => {
+    if (view !== "play" && view !== "daily") return;
+    if (!pendingBoardCoachRef.current) return;
+    if (state.gameOver || state.dailySolved) {
+      pendingBoardCoachRef.current = false;
+      return;
+    }
+    if (guideActive) return;
+    pendingBoardCoachRef.current = false;
+    const t = window.setTimeout(() => {
+      showLongestPathCoach();
+    }, 450);
+    return () => window.clearTimeout(t);
+  }, [
+    view,
+    state.board,
+    state.clearsCount,
+    state.gameOver,
+    state.dailySolved,
+    guideActive,
+    showLongestPathCoach,
+  ]);
 
   const onShare = async () => {
     const text =
@@ -918,6 +1056,9 @@ export function GameApp() {
                 clearSession();
                 setHasSession(false);
                 clearPathUi();
+                pendingBoardCoachRef.current = true;
+                setBoardCoachActive(false);
+                setHintsLeft(STARTING_HINTS);
                 dispatch({ type: "REPLACE", state: newEndlessGame() });
                 setView("play");
               }}
@@ -960,12 +1101,16 @@ export function GameApp() {
           <div className="space-y-2 px-1 text-sm text-[#1E2A32]/55">
             <p>Same symbol or color · max 2 links · close a loop of 4+.</p>
             <p>
+              Longer loops score more and refill safer — always hunt the
+              longest path on the board.
+            </p>
+            <p>
               ★ Wilds match anything · 🔒 locks open beside a clear · ↗ bridges
               link diagonally.
             </p>
             <p>
-              Chain clears for combo fever · Hint shows half a path — finish it
-              for points, or tap again for the full guide.
+              Hint clears a full path for you; out of hints, a puzzle unlocks
+              half a path to finish yourself.
             </p>
             <p>Wrong connections can block future moves. Think ahead.</p>
           </div>
@@ -1097,12 +1242,12 @@ export function GameApp() {
               state.dailySolved ||
               view === "tutorial" ||
               mathOpen ||
-              guideActive
+              guideActive ||
+              (hintsLeft <= 0 && zeroHintCooldown)
             }
             onClick={useHint}
           >
-            {hintThinkActive && !guideActive ? "Full hint" : "Hint"} (
-            {hintsLeft}/{MAX_HINTS})
+            Hint ({hintsLeft}/{MAX_HINTS})
           </IconButton>
         </div>
       </header>
@@ -1110,8 +1255,16 @@ export function GameApp() {
       {showDailyHud && state.dailyObjectives && state.dailyProgress && (
         <div className="-mt-1 mb-2 space-y-1.5 rounded-2xl bg-black/[0.03] px-3 py-2">
           <p className="text-center text-[11px] uppercase tracking-wider text-[#1E2A32]/4">
-            Today&apos;s goals
+            Daily ·{" "}
+            {(() => {
+              const label = dailyDifficultyForStage(state.dailyStage);
+              return `${label[0]!.toUpperCase()}${label.slice(1)}`;
+            })()}{" "}
+            ({state.dailyStage + 1}/3)
             {streak.current > 0 ? ` · streak ${streak.current}` : ""}
+          </p>
+          <p className="text-center text-xs font-medium text-[#E9A319]">
+            Longest path only — shorter links won&apos;t connect
           </p>
           <ul className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-xs text-[#1E2A32]/7">
             <li>
@@ -1134,7 +1287,8 @@ export function GameApp() {
             </li>
           </ul>
           <p className="text-center text-[11px] text-[#1E2A32]/4">
-            Clear the board in {state.dailyMoveLimit} moves
+            Clear each stage&apos;s longest loop ·{" "}
+            {state.dailyMoveLimit - state.moveCount} moves left · hints = 0 pts
           </p>
         </div>
       )}
@@ -1213,8 +1367,8 @@ export function GameApp() {
               Quick puzzle
             </h3>
             <p className="mt-2 text-sm text-[#1E2A32]/55">
-              Out of hints — solve this for the full path. You&apos;ll get the
-              lowest points for this clear.
+              Out of hints — solve this for half the path. Finish the loop
+              yourself for full points.
             </p>
             <p className="mt-6 text-center font-[family-name:var(--font-display)] text-4xl font-semibold tracking-tight">
               {mathChallenge.prompt} = ?
@@ -1270,24 +1424,49 @@ export function GameApp() {
         <p className="mt-3 text-center text-sm font-medium text-[#E9A319]">
           {guideWillComplete
             ? "Showing path… then clearing"
-            : "Think — half the path"}
+            : boardCoachActive
+              ? "Longest path on this board"
+              : "Think — half the path"}
         </p>
       )}
 
-      {hintThinkActive && !guideActive && !mathOpen && (
+      {boardCoachActive && !guideActive && !mathOpen && (
+        <div className="mt-3 space-y-1 text-center text-sm text-[#1E2A32]/7">
+          <p className="font-medium text-[#E9A319]">How to play this board</p>
+          <p>
+            Follow the highlighted longest loop
+            {hintScore > 0 ? ` (~${hintScore} pts)` : ""}. Bigger clears score
+            more.
+          </p>
+          <p className="text-xs text-[#1E2A32]/45">
+            Drag the path yourself — tip fades when you start.
+          </p>
+        </div>
+      )}
+
+      {hintThinkActive && !guideActive && !mathOpen && hintsLeft <= 0 && (
         <div className="mt-3 space-y-1 text-center text-sm text-[#1E2A32]/7">
           <p className="font-medium text-[#E9A319]">Think it through</p>
           <p>
             Half the path is shown. Finish it yourself for full points.
           </p>
           <p className="text-xs text-[#1E2A32]/45">
-            Still stuck? Tap Hint again
-            {hintsLeft > 0
-              ? " for the full path (real points)."
-              : " — solve a quick question for the full path (lowest points)."}
+            {zeroHintCooldown
+              ? "Try a bit more, then Hint again for another peek."
+              : "Still stuck? Tap Hint and solve a quick question for another half-path peek."}
           </p>
         </div>
       )}
+
+      {zeroHintCooldown &&
+        hintsLeft <= 0 &&
+        !hintThinkActive &&
+        !guideActive &&
+        !mathOpen && (
+          <p className="mt-3 text-center text-xs text-[#1E2A32]/45">
+            Try a bit more, then Hint again.
+          </p>
+        )}
 
       <p className="mt-4 text-center text-xs text-[#1E2A32]/35">
         Drag a full loop to clear · lift early and the path is discarded
@@ -1434,6 +1613,8 @@ export function GameApp() {
                     setHintsLeft(STARTING_HINTS);
                     clearPathUi();
                     clearSession();
+                    pendingBoardCoachRef.current = true;
+                    setBoardCoachActive(false);
                     dispatch({ type: "REPLACE", state: newEndlessGame() });
                     setView("play");
                     recordedGameOver.current = false;
@@ -1454,6 +1635,8 @@ export function GameApp() {
                     clearSession();
                     if (state.mode === "daily") startDaily();
                     else {
+                      pendingBoardCoachRef.current = true;
+                      setBoardCoachActive(false);
                       dispatch({ type: "REPLACE", state: newEndlessGame() });
                       setView("play");
                     }
